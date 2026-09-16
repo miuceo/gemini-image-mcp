@@ -21,6 +21,7 @@ dependencies = [
     "mcp[cli]>=2.0.0",
     "python-dotenv>=1.0.0",
     "filelock>=3.13.0",
+    "browser-cookie3>=0.20.1",
 ]
 
 [project.urls]

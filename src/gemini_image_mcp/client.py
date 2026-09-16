@@ -48,8 +48,38 @@ _AUTH_ERROR_MESSAGE = (
     "You need to supply two cookies from a logged-in gemini.google.com session:\n"
     "  - __Secure-1PSID  (set as the GEMINI_1PSID environment variable)\n"
     "  - __Secure-1PSIDTS (set as the GEMINI_1PSIDTS environment variable)\n"
+    "Alternatively, sign in to gemini.google.com in Firefox and leave GEMINI_1PSID unset;\n"
+    "the cookies are then read from Firefox automatically.\n"
     "See the 'Getting your cookies' section of README.md for step-by-step instructions."
 )
+
+
+def load_firefox_cookies(cookie_file: str | None = None) -> tuple[str | None, str | None]:
+    """Read `__Secure-1PSID` / `__Secure-1PSIDTS` from the local Firefox cookie store.
+
+    Parameters
+    ----------
+    cookie_file: `str | None`, optional
+        Path to a specific profile's `cookies.sqlite`. Defaults to Firefox's default profile.
+
+    Returns
+    -------
+    `tuple[str | None, str | None]`
+        The two cookie values, or `None` for any that could not be found.
+
+    """
+    try:
+        import browser_cookie3
+    except ImportError:
+        return None, None
+
+    try:
+        jar = browser_cookie3.firefox(cookie_file=cookie_file, domain_name="google.com")
+    except Exception:  # noqa: BLE001 - Firefox missing / profile unreadable is not fatal here
+        return None, None
+
+    values = {cookie.name: cookie.value for cookie in jar if cookie.domain == ".google.com"}
+    return values.get("__Secure-1PSID"), values.get("__Secure-1PSIDTS")
 
 
 def map_library_error(exc: Exception) -> GeminiImageError:
@@ -116,24 +146,62 @@ async def get_client(settings: Settings | None = None) -> GeminiClient:
 
         settings = settings or get_settings()
 
-        if not settings.secure_1psid:
-            raise GeminiAuthError(_AUTH_ERROR_MESSAGE)
-
-        client = GeminiClient(
-            secure_1psid=settings.secure_1psid,
-            secure_1psidts=settings.secure_1psidts,
-            proxy=settings.proxy,
+        use_firefox = settings.cookie_source == "firefox" or (
+            settings.cookie_source == "auto" and not settings.secure_1psid
         )
-
-        try:
-            await client.init(
-                timeout=settings.timeout,
-                auto_close=False,
-                auto_refresh=True,
-                refresh_interval=settings.refresh_interval,
+        if use_firefox:
+            client = await _init_client(
+                settings, *load_firefox_cookies(settings.firefox_cookie_file)
             )
-        except Exception as exc:  # noqa: BLE001 - translated deliberately at this boundary
-            raise map_library_error(exc) from exc
+        else:
+            try:
+                client = await _init_client(
+                    settings, settings.secure_1psid, settings.secure_1psidts
+                )
+            except GeminiAuthError:
+                if settings.cookie_source != "auto":
+                    raise
+                # Cookies in the environment went stale: fall back to Firefox's login.
+                client = await _init_client(
+                    settings, *load_firefox_cookies(settings.firefox_cookie_file)
+                )
 
         _client = client
         return _client
+
+
+async def reset_client() -> None:
+    """Close and drop the cached client so the next `get_client()` re-reads cookies."""
+    global _client
+
+    async with _client_lock:
+        if _client is not None:
+            try:
+                await _client.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup of a dead session
+                pass
+            _client = None
+
+
+async def _init_client(
+    settings: Settings, secure_1psid: str | None, secure_1psidts: str | None
+) -> GeminiClient:
+    """Construct and initialize a `GeminiClient` with the given cookie values."""
+    if not secure_1psid:
+        raise GeminiAuthError(_AUTH_ERROR_MESSAGE)
+
+    client = GeminiClient(
+        secure_1psid=secure_1psid,
+        secure_1psidts=secure_1psidts,
+        proxy=settings.proxy,
+    )
+    try:
+        await client.init(
+            timeout=settings.timeout,
+            auto_close=False,
+            auto_refresh=True,
+            refresh_interval=settings.refresh_interval,
+        )
+    except Exception as exc:  # noqa: BLE001 - translated deliberately at this boundary
+        raise map_library_error(exc) from exc
+    return client

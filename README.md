@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="assets/banner.jpg" alt="Gemini Image MCP" width="100%" />
+</p>
+
+<p align="center">
+  <img src="assets/logo.png" alt="Gemini Image MCP logo" width="96" />
+</p>
+
 # gemini-image-mcp
 
 An MCP server that generates and edits images by driving the consumer **Gemini web app**
@@ -78,6 +86,20 @@ error message (e.g. about missing/expired cookies) on failure.
    `GEMINI_1PSIDTS`.
 6. Copy `.env.example` to `.env` and paste the two values into `GEMINI_1PSID` and
    `GEMINI_1PSIDTS`.
+
+### Automatic cookies from Firefox (recommended)
+
+Instead of pasting cookies, sign in to https://gemini.google.com in Firefox and leave
+`GEMINI_1PSID` / `GEMINI_1PSIDTS` empty. The server reads both cookies straight from
+Firefox's cookie store (via `browser-cookie3`) at startup, and again whenever Gemini
+reports the session as signed out - so a fresh Firefox login is picked up without
+touching `.env`. Firefox doesn't need to be running. Stay signed in there (no private
+window, don't clear its cookies).
+
+- `GEMINI_COOKIE_SOURCE` - `auto` (default: `.env` values if set, else Firefox, with
+  Firefox as fallback when they're stale), `env`, or `firefox`.
+- `GEMINI_FIREFOX_COOKIE_FILE` - path to a specific profile's `cookies.sqlite` if you
+  have several Firefox profiles.
 
 ### Cookie lifetime
 

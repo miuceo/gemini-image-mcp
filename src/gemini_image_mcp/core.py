@@ -16,7 +16,13 @@ from typing import Any, Literal
 
 from gemini_webapi.types import GeneratedImage
 
-from .client import GeminiGenerationError, get_client, map_library_error
+from .client import (
+    GeminiGenerationError,
+    GeminiImageError,
+    get_client,
+    map_library_error,
+    reset_client,
+)
 from .config import Settings, get_settings
 
 # Verbs that already read as an explicit request to generate/create/draw an image. If the
@@ -165,6 +171,11 @@ async def _save_generated_images(
     return saved_paths
 
 
+def _looks_signed_out(text: str | None) -> bool:
+    """Whether Gemini's text reply says the session is signed out (stale cookies)."""
+    return "signed out" in (text or "").lower()
+
+
 def _model_label(model: str | None, settings: Settings) -> str:
     return model or settings.default_model or "default"
 
@@ -210,6 +221,14 @@ async def generate_images(
 
     try:
         output = await client.generate_content(shaped_prompt, model=effective_model)
+        if not output.images and _looks_signed_out(output.text):
+            # Session went stale mid-process: rebuild the client (re-reading Firefox's
+            # cookies when configured) and retry once.
+            await reset_client()
+            client = await get_client(settings)
+            output = await client.generate_content(shaped_prompt, model=effective_model)
+    except GeminiImageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - translated at this boundary
         raise map_library_error(exc) from exc
 
@@ -307,8 +326,16 @@ async def edit_images(
     effective_model = model or settings.default_model
     chat = client.start_chat(model=effective_model)
 
+    files = [str(p) for p in resolved_inputs]
     try:
-        output = await chat.send_message(prompt, files=[str(p) for p in resolved_inputs])
+        output = await chat.send_message(prompt, files=files)
+        if not output.images and _looks_signed_out(output.text):
+            await reset_client()
+            client = await get_client(settings)
+            chat = client.start_chat(model=effective_model)
+            output = await chat.send_message(prompt, files=files)
+    except GeminiImageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - translated at this boundary
         raise map_library_error(exc) from exc
 

@@ -32,6 +32,8 @@ class Settings:
     timeout: int
     proxy: str | None
     refresh_interval: float
+    cookie_source: str = "auto"
+    firefox_cookie_file: str | None = None
 
     @classmethod
     def load(cls, env_file: str | Path | None = None) -> "Settings":
@@ -97,6 +99,10 @@ class Settings:
             timeout=timeout,
             proxy=os.environ.get("GEMINI_PROXY") or None,
             refresh_interval=refresh_interval,
+            # "auto": use GEMINI_1PSID from the environment if set, else read Firefox.
+            # "env": environment only. "firefox": always read Firefox's cookie store.
+            cookie_source=(os.environ.get("GEMINI_COOKIE_SOURCE") or "auto").strip().lower(),
+            firefox_cookie_file=os.environ.get("GEMINI_FIREFOX_COOKIE_FILE") or None,
         )
 
 

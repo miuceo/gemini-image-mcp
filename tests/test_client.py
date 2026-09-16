@@ -94,3 +94,66 @@ def test_all_mapped_results_are_gemini_image_error():
         RuntimeError("x"),
     ):
         assert isinstance(map_library_error(exc), GeminiImageError)
+
+
+# --- cookie source selection ---------------------------------------------------------
+
+
+from pathlib import Path
+
+from gemini_image_mcp import client as client_mod
+from gemini_image_mcp.config import Settings
+
+
+def _settings(**overrides) -> Settings:
+    base = dict(
+        secure_1psid=None,
+        secure_1psidts=None,
+        output_dir=Path("."),
+        cookie_path=Path("."),
+        default_model=None,
+        timeout=5,
+        proxy=None,
+        refresh_interval=240.0,
+        cookie_source="auto",
+        firefox_cookie_file=None,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+@pytest.fixture
+def fake_init(monkeypatch):
+    calls = []
+
+    async def _fake(settings, psid, psidts):
+        calls.append((psid, psidts))
+        if psid in (None, "stale"):
+            raise GeminiAuthError("nope")
+        return object()
+
+    monkeypatch.setattr(client_mod, "_init_client", _fake)
+    monkeypatch.setattr(client_mod, "load_firefox_cookies", lambda f=None: ("ff", "ffts"))
+    monkeypatch.setattr(client_mod, "_client", None)
+    return calls
+
+
+async def test_auto_without_env_cookies_reads_firefox(fake_init):
+    await client_mod.get_client(_settings())
+    assert fake_init == [("ff", "ffts")]
+
+
+async def test_auto_prefers_env_cookies(fake_init):
+    await client_mod.get_client(_settings(secure_1psid="env", secure_1psidts="envts"))
+    assert fake_init == [("env", "envts")]
+
+
+async def test_auto_falls_back_to_firefox_when_env_cookies_stale(fake_init):
+    await client_mod.get_client(_settings(secure_1psid="stale"))
+    assert fake_init == [("stale", None), ("ff", "ffts")]
+
+
+async def test_env_source_never_reads_firefox(fake_init):
+    with pytest.raises(GeminiAuthError):
+        await client_mod.get_client(_settings(secure_1psid="stale", cookie_source="env"))
+    assert fake_init == [("stale", None)]

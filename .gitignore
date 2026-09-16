@@ -1,0 +1,27 @@
+# Secrets / local environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Generated output (images, gallery, manifest, cookie cache)
+output/
+manifest.json.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

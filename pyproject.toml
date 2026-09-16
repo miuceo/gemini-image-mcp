@@ -1,0 +1,50 @@
+[project]
+name = "gemini-image-mcp"
+version = "0.1.0"
+description = "MCP server that generates images via the Gemini web app (gemini-webapi), backed by the user's own session cookies."
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+keywords = ["mcp", "gemini", "image-generation", "claude", "google-gemini", "nano-banana"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics",
+]
+dependencies = [
+    "gemini-webapi>=2.1.1",
+    "mcp[cli]>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "filelock>=3.13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/miuceo/gemini-image-generator-mcp"
+Repository = "https://github.com/miuceo/gemini-image-generator-mcp"
+Issues = "https://github.com/miuceo/gemini-image-generator-mcp/issues"
+
+[project.scripts]
+gemini-image-mcp = "gemini_image_mcp.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gemini_image_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"

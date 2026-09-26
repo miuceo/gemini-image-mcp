@@ -167,6 +167,7 @@ Equivalent JSON (e.g. for `claude_desktop_config.json` or `.mcp.json`):
 | `edit_image` | `prompt: str`, `image_paths: list[str]`, `model: str \| None = None`, `publish: bool \| None = None` | Same return shape as `generate_image`, applied to edits of the given source image(s). |
 | `publish_image` | `image_paths: list[str]` | Uploads existing images (absolute paths, `images/<file>` paths, or gallery ids) to your configured GitHub repo and returns their public URLs. |
 | `list_models` | _(none)_ | The models (image/chat) available to the signed-in account, as display name + internal model name/id, so you can pick a non-default `model` for the other two tools. |
+| `doctor` | _(none)_ | A setup health check, one ok/warn/fail line per item (see [Troubleshooting](#troubleshooting)). |
 
 None of the tools return base64 image data — the gallery is the intended viewing surface,
 and every tool result includes its path so you can always click through to it.
@@ -233,6 +234,28 @@ async def handle_image_request(prompt: str) -> None:
 ```
 
 ## Troubleshooting
+
+Start with the built-in health check:
+
+```bash
+uv run gemini-image-mcp doctor
+```
+
+It checks, in order:
+
+| Check | What it looks at |
+| --- | --- |
+| Output directory | `GEMINI_OUTPUT_DIR` exists and is writable. |
+| Cookie cache | The cache is outside the output folder (so sharing images never shares your session). |
+| Cookies | `GEMINI_1PSID` / `GEMINI_1PSIDTS` are set, or Firefox has a Gemini login. |
+| Gemini sign-in | The cookies actually work, and how many models the account can use. |
+| Gallery | How many images the manifest holds, and whether a corrupt one was set aside. |
+| GitHub publishing | Where the token comes from, that it can push to the repo, and whether the repo is public. |
+
+Each line is `[ OK ]`, `[WARN]`, `[FAIL]` or `[SKIP]` with a hint on how to fix it, and the
+command exits with status 1 if anything failed. Add `--offline` to skip the calls to Gemini
+and GitHub. Cookie and token values are never printed. You can also just ask Claude to "run
+the doctor", which calls the `doctor` tool.
 
 - **Auth / cookie expiry** — `generate_image`, `edit_image`, and `list_models` all raise a
   clean error naming the exact problem when `GEMINI_1PSID`/`GEMINI_1PSIDTS` are missing or

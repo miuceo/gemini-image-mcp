@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "gemini-webapi>=2.1.1",
-    "mcp[cli]>=2.0.0",
+    "mcp[cli]>=2.2.0",
     "python-dotenv>=1.0.0",
     "filelock>=4.0.1",
     "browser-cookie3>=0.20.1",

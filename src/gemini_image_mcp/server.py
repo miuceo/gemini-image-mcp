@@ -14,10 +14,14 @@ near `main()` for how that risk was checked.
 
 from __future__ import annotations
 
+import asyncio
+import sys
+
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .client import GeminiImageError
+from . import doctor as _doctor
+from .client import GeminiImageError, reset_client
 from .config import get_settings
 from .gallery import ManifestLockTimeout
 from .core import (
@@ -191,8 +195,31 @@ async def list_models() -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+async def doctor() -> str:
+    """Check this server's setup: output folder, cookies, Gemini sign-in, gallery, GitHub.
+
+    Use when image generation or publishing fails, or the user asks whether things are set
+    up correctly. Returns one ok/warn/fail line per check with a fix hint; never includes
+    cookie or token values.
+
+    """
+    return _doctor.format_report(await _doctor.run_checks(get_settings()))
+
+
+async def _doctor_cli(online: bool) -> int:
+    try:
+        checks = await _doctor.run_checks(get_settings(), online=online)
+    finally:
+        await reset_client()
+    print(_doctor.format_report(checks))
+    return 1 if any(c.status == "fail" for c in checks) else 0
+
+
 def main() -> None:
-    """Run the MCP server over stdio.
+    """Run the MCP server over stdio, or `gemini-image-mcp doctor [--offline]`.
+
+    The `doctor` subcommand is a plain CLI (not the stdio protocol), so it prints to stdout.
 
     Stdio MCP servers use stdout exclusively for the JSON-RPC protocol stream, so nothing
     here may print to stdout. This was verified by:
@@ -203,6 +230,9 @@ def main() -> None:
         `print()` calls; any diagnostics should use `sys.stderr` or the `logging` module
         configured to a stderr handler, never stdout.
     """
+    args = sys.argv[1:]
+    if args and args[0] == "doctor":
+        sys.exit(asyncio.run(_doctor_cli(online="--offline" not in args[1:])))
     mcp.run(transport="stdio")
 
 

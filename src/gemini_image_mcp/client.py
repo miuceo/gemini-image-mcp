@@ -113,6 +113,13 @@ def map_library_error(exc: Exception) -> GeminiImageError:
 
 _client: GeminiClient | None = None
 _client_lock = asyncio.Lock()
+# Where the current client's cookies came from, for diagnostics (never the values).
+_cookie_source_used: str | None = None
+
+
+def cookie_source_used() -> str | None:
+    """Where the live client's cookies came from ("environment" / "Firefox"), if any."""
+    return _cookie_source_used if _client is not None else None
 
 
 async def get_client(settings: Settings | None = None) -> GeminiClient:
@@ -134,7 +141,7 @@ async def get_client(settings: Settings | None = None) -> GeminiClient:
         For any other failure while constructing or initializing the client.
 
     """
-    global _client
+    global _client, _cookie_source_used
 
     if _client is not None:
         return _client
@@ -153,11 +160,13 @@ async def get_client(settings: Settings | None = None) -> GeminiClient:
             client = await _init_client(
                 settings, *load_firefox_cookies(settings.firefox_cookie_file)
             )
+            source = "Firefox"
         else:
             try:
                 client = await _init_client(
                     settings, settings.secure_1psid, settings.secure_1psidts
                 )
+                source = "environment"
             except GeminiAuthError:
                 if settings.cookie_source != "auto":
                     raise
@@ -165,8 +174,10 @@ async def get_client(settings: Settings | None = None) -> GeminiClient:
                 client = await _init_client(
                     settings, *load_firefox_cookies(settings.firefox_cookie_file)
                 )
+                source = "Firefox (the GEMINI_1PSID cookies were stale)"
 
         _client = client
+        _cookie_source_used = source
         return _client
 
 

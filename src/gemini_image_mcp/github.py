@@ -71,6 +71,34 @@ def _resolve_token(settings: Settings) -> str:
     )
 
 
+def token_source(settings: Settings) -> str | None:
+    """Name of where the GitHub token comes from (never the token itself), or None."""
+    if settings.github_token:
+        return "GEMINI_GITHUB_TOKEN"
+    if os.environ.get("GITHUB_TOKEN"):
+        return "GITHUB_TOKEN"
+    try:
+        _resolve_token(settings)
+    except GitHubPublishError:
+        return None
+    return "GitHub CLI (gh auth token)"
+
+
+def _repo_info_sync(settings: Settings) -> dict:
+    token = _resolve_token(settings)
+    try:
+        return _request("GET", f"{API_ROOT}/repos/{settings.github_repo}", token)
+    except urllib.error.HTTPError as exc:
+        raise GitHubPublishError(_http_error_message(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise GitHubPublishError(f"Could not reach GitHub: {exc.reason}") from exc
+
+
+async def repo_info(settings: Settings) -> dict:
+    """The configured repository's metadata (`private`, `permissions`, ...) from the API."""
+    return await asyncio.to_thread(_repo_info_sync, settings)
+
+
 def _request(method: str, url: str, token: str, body: dict | None = None) -> dict:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)

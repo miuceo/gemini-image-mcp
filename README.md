@@ -36,7 +36,11 @@ no-warranty disclaimer.
   session — no API key, no per-image billing.
 - **`list_models`** to discover which models your account can use.
 - Every generated or edited image accumulates into a single, self-contained, interactive
-  HTML gallery (`output/gallery.html`) — the primary way to browse your output.
+  HTML gallery (`output/gallery.html`) — the primary way to browse your output. Click any
+  image for a detail view with its full prompt, metadata, and copy buttons.
+- **Optional GitHub publishing:** point it at a repository you own and every new image is
+  also uploaded there, giving you a stable public URL to use in other projects. Off unless
+  you configure it — see [Publishing images to GitHub](#publishing-images-to-github).
 - `gemini_image_mcp.core` has zero `mcp` imports, so it can be imported directly by other
   Python code (e.g. a Telegram bot) without going through the MCP protocol at all.
 - Automatic image-format correction: Gemini doesn't always return the format you'd expect,
@@ -105,8 +109,11 @@ window, don't clear its cookies).
 
 `__Secure-1PSIDTS` rotates frequently. `gemini-webapi` refreshes it in the background
 while the server is running and persists the refreshed value to the path in
-`GEMINI_COOKIE_PATH` (default: `output/.cookies`), so in the happy path you only paste
-cookies once. Chrome's session credentials tend to be shorter-lived than Firefox's; if you
+`GEMINI_COOKIE_PATH` (default: a private per-user folder: `%LOCALAPPDATA%\gemini-image-mcp\cookies` on Windows,
+`~/Library/Application Support/gemini-image-mcp/cookies` on macOS,
+`~/.local/state/gemini-image-mcp/cookies` on Linux), so in the happy path you only paste
+cookies once. The cache is kept outside `output/` on purpose, so sharing or publishing
+your images never exposes your session. Chrome's session credentials tend to be shorter-lived than Firefox's; if you
 find yourself re-pasting often, a dedicated Firefox profile kept signed in to Gemini is a
 more durable workaround.
 
@@ -156,12 +163,57 @@ Equivalent JSON (e.g. for `claude_desktop_config.json` or `.mcp.json`):
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `generate_image` | `prompt: str`, `model: str \| None = None` | Absolute path(s) of the newly saved image(s), the absolute path to `output/gallery.html`, the image count, and the model actually used. |
-| `edit_image` | `prompt: str`, `image_paths: list[str]`, `model: str \| None = None` | Same return shape as `generate_image`, applied to edits of the given source image(s). |
+| `generate_image` | `prompt: str`, `model: str \| None = None`, `publish: bool \| None = None` | Absolute path(s) of the newly saved image(s), the absolute path to `output/gallery.html`, the image count, the model actually used, and each image's public URL if it was published. |
+| `edit_image` | `prompt: str`, `image_paths: list[str]`, `model: str \| None = None`, `publish: bool \| None = None` | Same return shape as `generate_image`, applied to edits of the given source image(s). |
+| `publish_image` | `image_paths: list[str]` | Uploads existing images (absolute paths, `images/<file>` paths, or gallery ids) to your configured GitHub repo and returns their public URLs. |
 | `list_models` | _(none)_ | The models (image/chat) available to the signed-in account, as display name + internal model name/id, so you can pick a non-default `model` for the other two tools. |
 
 None of the tools return base64 image data — the gallery is the intended viewing surface,
 and every tool result includes its path so you can always click through to it.
+
+## Publishing images to GitHub
+
+Optionally, every generated or edited image can also be committed to a GitHub repository
+of your choice (for example a public `my-images` repo), so you get a direct link you can
+drop into websites, READMEs, or other projects:
+
+```
+https://raw.githubusercontent.com/<owner>/<repo>/<branch>/images/65157777b2c94e0f8d1a3c5e7f902468.jpg
+```
+
+Files are named by their gallery id, and commit messages carry only a short id, so your
+prompts stay private even in a public repo (see `GEMINI_GITHUB_INCLUDE_PROMPT` below to
+opt in to prompt-based names). Upload goes through the GitHub REST API, one commit per
+image, so no local clone is needed. To turn it on, add to `.env`:
+
+```dotenv
+GEMINI_GITHUB_REPO=yourname/my-images
+```
+
+- **Token** - `GEMINI_GITHUB_TOKEN`, else `GITHUB_TOKEN`, else the GitHub CLI's login
+  (`gh auth token`). **Recommended:** create a
+  [fine-grained token](https://github.com/settings/personal-access-tokens/new) limited to
+  that one repository with only **Contents: read and write**, and set it as
+  `GEMINI_GITHUB_TOKEN`. The `gh` fallback is convenient but its token usually has full
+  `repo` access to *all* your repositories, far more than this server needs.
+- `GEMINI_GITHUB_BRANCH` - branch to commit to (default: the repo's default branch).
+- `GEMINI_GITHUB_PATH` - folder inside the repo (default: `images`).
+- `GEMINI_GITHUB_AUTO_PUBLISH` - `false` (default) publishes only when a call passes
+  `publish=true` or you use the `publish_image` tool; `true` publishes every new image.
+- `GEMINI_GITHUB_INCLUDE_PROMPT` - `false` (default). Set to `true` to name files after
+  the prompt (`images/a-watercolor-fox-65157777.jpg`) and put the prompt in the commit
+  message. Remember that anything in a public repo, including its history, is public.
+- Only images inside `output/images/` can be published; any other path is refused.
+
+You can also override per call ("generate ... and publish it"), and publish older
+images later with `publish_image`. Published images show a **Published** badge in the
+gallery with **Copy link** / **Markdown** buttons.
+
+A publishing failure (bad token, network) never loses the image: it's still saved locally
+and added to the gallery, and the tool result explains what went wrong.
+
+Raw links only work without authentication if the target repository is **public**. Keep
+in mind that anything you publish there is visible to everyone.
 
 ## Using the core library directly
 
@@ -192,10 +244,14 @@ async def handle_image_request(prompt: str) -> None:
   the refusal directly.
 - **Usage limits / temporarily blocked** — Gemini's own rate limiting on the web app.
   Wait before retrying; there is no bypass.
+- **GitHub publish failed** - the tool result includes GitHub's message. 401/403 means
+  the token is missing, expired, or lacks Contents write access to the repo; 404 means
+  `GEMINI_GITHUB_REPO` is wrong or the token can't see that repository.
 - **Where things live on disk** — generated/edited images: `output/images/`; the gallery:
   `output/gallery.html`; the manifest backing the gallery: `output/manifest.json`; the
-  persisted cookie cache: wherever `GEMINI_COOKIE_PATH` points (default:
-  `output/.cookies`). All of `output/` is gitignored.
+  persisted cookie cache: wherever `GEMINI_COOKIE_PATH` points (default: a per-user folder
+  outside the project, see [Cookie lifetime](#cookie-lifetime); an old `output/.cookies`
+  cache is moved there automatically). All of `output/` is gitignored.
 
 ## Known limitations
 

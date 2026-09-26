@@ -1,7 +1,7 @@
 """MCP server exposing Gemini image generation/editing tools.
 
-Wraps `gemini_image_mcp.core` behind three MCP tools (`generate_image`, `edit_image`,
-`list_models`) and serves them over stdio via the `mcp` package's `MCPServer`.
+Wraps `gemini_image_mcp.core` behind MCP tools (`generate_image`, `edit_image`,
+`publish_image`, `list_models`) and serves them over stdio via the `mcp` package's `MCPServer`.
 
 Every generated/edited image is appended to a cumulative, self-contained HTML gallery at
 `<output_dir>/gallery.html`. That gallery - not base64 image data in the tool response - is
@@ -20,7 +20,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .client import GeminiImageError
 from .config import get_settings
 from .gallery import ManifestLockTimeout
-from .core import GeneratedRecord, edit_images, generate_images, list_models as _list_models
+from .core import (
+    GeneratedRecord,
+    edit_images,
+    generate_images,
+    list_models as _list_models,
+    publish_images,
+)
 
 mcp = MCPServer(
     name="gemini-image-mcp",
@@ -28,7 +34,8 @@ mcp = MCPServer(
         "Generates and edits images by driving the Gemini web app with the user's own "
         "session cookies (no metered API key). Every result is also appended to a "
         "cumulative HTML gallery on disk; the gallery path returned by each tool is the "
-        "primary way to view images, since tool results never include raw image data."
+        "primary way to view images, since tool results never include raw image data. "
+        "If GitHub publishing is configured, results also include a public URL per image."
     ),
 )
 
@@ -38,14 +45,25 @@ def _format_result(records: list[GeneratedRecord], model_used: str, gallery_path
     abs_paths = [str((settings.output_dir / r.image_path).resolve()) for r in records]
 
     lines = [f"Generated {len(records)} image(s) using model '{model_used}'."]
-    for p in abs_paths:
+    for record, p in zip(records, abs_paths):
         lines.append(f"  - {p}")
+        lines.extend(_publish_lines(record))
     lines.append(f"Gallery (view all images here): {gallery_path}")
     return "\n".join(lines)
 
 
+def _publish_lines(record: GeneratedRecord) -> list[str]:
+    if record.remote_url:
+        return [f"    URL: {record.remote_url}"]
+    if record.publish_error:
+        return [f"    GitHub publish failed (image kept locally): {record.publish_error}"]
+    return []
+
+
 @mcp.tool()
-async def generate_image(prompt: str, model: str | None = None) -> str:
+async def generate_image(
+    prompt: str, model: str | None = None, publish: bool | None = None
+) -> str:
     """Generate one or more new images from a text prompt using the Gemini web app.
 
     The `prompt` should describe the desired image in as much visual detail as helpful
@@ -61,11 +79,17 @@ async def generate_image(prompt: str, model: str | None = None) -> str:
     model: `str | None`, optional
         Model name/alias/id to use (see `list_models`). Defaults to the server's
         configured default model, or the account's own default if unset.
+    publish: `bool | None`, optional
+        Upload the result to the user's configured GitHub image repo and return its
+        public URL. Leave unset to follow the server's default (off unless
+        GEMINI_GITHUB_AUTO_PUBLISH=true); has no effect if GitHub publishing isn't configured.
 
     """
     settings = get_settings()
     try:
-        records = await generate_images(prompt, model=model, settings=settings)
+        records = await generate_images(
+            prompt, model=model, settings=settings, publish=publish
+        )
     except (GeminiImageError, ManifestLockTimeout) as exc:
         raise ToolError(str(exc)) from exc
 
@@ -75,7 +99,9 @@ async def generate_image(prompt: str, model: str | None = None) -> str:
 
 
 @mcp.tool()
-async def edit_image(prompt: str, image_paths: list[str], model: str | None = None) -> str:
+async def edit_image(
+    prompt: str, image_paths: list[str], model: str | None = None, publish: bool | None = None
+) -> str:
     """Edit one or more existing local image files using a text instruction.
 
     `image_paths` must be paths to existing image files on disk (e.g. a photo or a
@@ -93,17 +119,52 @@ async def edit_image(prompt: str, image_paths: list[str], model: str | None = No
     model: `str | None`, optional
         Model name/alias/id to use (see `list_models`). Defaults to the server's
         configured default model, or the account's own default if unset.
+    publish: `bool | None`, optional
+        Upload the result to the user's configured GitHub image repo and return its
+        public URL. Leave unset to follow the server's default (off unless
+        GEMINI_GITHUB_AUTO_PUBLISH=true); has no effect if GitHub publishing isn't configured.
 
     """
     settings = get_settings()
     try:
-        records = await edit_images(prompt, image_paths, model=model, settings=settings)
+        records = await edit_images(
+            prompt, image_paths, model=model, settings=settings, publish=publish
+        )
     except (GeminiImageError, ManifestLockTimeout) as exc:
         raise ToolError(str(exc)) from exc
 
     gallery_path = settings.output_dir / "gallery.html"
     model_used = records[0].model if records else (model or settings.default_model or "default")
     return _format_result(records, model_used, gallery_path.resolve())
+
+
+@mcp.tool()
+async def publish_image(image_paths: list[str]) -> str:
+    """Publish already-generated images to the user's configured GitHub image repository.
+
+    Use this for images created earlier (or with publishing turned off) that the user now
+    wants hosted. Each entry may be an absolute image path, a path relative to the output
+    directory (e.g. `images/<id>.jpg`), or a gallery record id. Returns the public URL of
+    each published image; gallery entries are updated to show the link.
+
+    Parameters
+    ----------
+    image_paths: `list[str]`
+        Images to publish.
+
+    """
+    settings = get_settings()
+    try:
+        records = await publish_images(image_paths, settings=settings)
+    except (GeminiImageError, ManifestLockTimeout) as exc:
+        raise ToolError(str(exc)) from exc
+
+    ok = [r for r in records if r.remote_url]
+    lines = [f"Published {len(ok)} of {len(records)} image(s) to {settings.github_repo}."]
+    for record in records:
+        lines.append(f"  - {(settings.output_dir / record.image_path).resolve()}")
+        lines.extend(_publish_lines(record))
+    return "\n".join(lines)
 
 
 @mcp.tool()

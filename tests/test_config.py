@@ -30,7 +30,9 @@ def test_load_defaults(tmp_path, monkeypatch):
     assert settings.refresh_interval == 240.0
 
 
-def test_load_output_dir_and_cookie_dir_are_created(tmp_path, monkeypatch):
+def test_load_output_dir_and_cookie_dir_are_created(
+    tmp_path, monkeypatch, _isolate_user_state_dir
+):
     output_dir = tmp_path / "custom_output"
     monkeypatch.setenv("GEMINI_OUTPUT_DIR", str(output_dir))
     settings = Settings.load(env_file=_no_dotenv(tmp_path))
@@ -39,11 +41,26 @@ def test_load_output_dir_and_cookie_dir_are_created(tmp_path, monkeypatch):
     assert settings.output_dir.is_dir()
     assert (settings.output_dir / "images").is_dir()
 
-    # Default cookie_path derives from output_dir and must be created too (the library never
-    # creates it, and previously it was never created here either - output/.cookies did not
-    # exist on disk before this fix).
-    assert settings.cookie_path == (output_dir / ".cookies").resolve()
+    # The default cookie cache lives in the per-user state dir, never inside output_dir
+    # (which gets shared/published), and must be created (the library never creates it).
+    assert settings.cookie_path == (_isolate_user_state_dir / "cookies").resolve()
     assert settings.cookie_path.is_dir()
+    assert not (settings.output_dir / ".cookies").exists()
+
+
+def test_load_migrates_legacy_cookie_cache_out_of_output_dir(
+    tmp_path, monkeypatch, _isolate_user_state_dir
+):
+    output_dir = tmp_path / "out"
+    legacy = output_dir / ".cookies"
+    legacy.mkdir(parents=True)
+    (legacy / ".cached_cookies_abc.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("GEMINI_OUTPUT_DIR", str(output_dir))
+
+    settings = Settings.load(env_file=_no_dotenv(tmp_path))
+
+    assert (settings.cookie_path / ".cached_cookies_abc.json").is_file()
+    assert not legacy.exists()
 
 
 def test_load_explicit_cookie_path_is_created_and_exported_to_environ(tmp_path, monkeypatch):

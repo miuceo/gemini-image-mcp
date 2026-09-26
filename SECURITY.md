@@ -21,9 +21,14 @@ values (`__Secure-1PSID`, `__Secure-1PSIDTS`) that you supply yourself. Understa
 those values go is the core of this project's security model:
 
 - They are read from your local `.env` file (or your process environment) and, once
-  refreshed, persisted to a local cookie cache file (`GEMINI_COOKIE_PATH`, default
-  `output/.cookies`). Both are gitignored by default and never leave your machine as part
-  of this project's normal operation.
+  refreshed, persisted to a local cookie cache file (`GEMINI_COOKIE_PATH`, default a
+  per-user folder such as `%LOCALAPPDATA%\gemini-image-mcp\cookies`, owner-only on
+  macOS/Linux). The cache deliberately lives outside `output/`, which you may share or
+  publish. Neither leaves your machine as part of this project's normal operation.
+- Tool arguments are treated as untrusted (an agent can be prompt-injected): `edit_image`
+  only accepts real image files (PNG/JPEG/WEBP/GIF, up to 20 MB), and `publish_image` only
+  uploads images inside `output/images/`, so neither can be used to send other local files
+  to Google or to GitHub.
 - They are sent only to Google's own `gemini.google.com` endpoints, via the third-party
   [`gemini-webapi`](https://pypi.org/project/gemini-webapi/) library that this project
   depends on — the same place they'd go if you used the Gemini web app in your browser.

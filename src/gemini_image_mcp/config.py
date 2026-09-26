@@ -7,6 +7,8 @@ frozen `Settings` dataclass. All environment variables are `GEMINI_`-prefixed.
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +16,49 @@ from dotenv import load_dotenv
 
 # Project root: three levels up from this file (src/gemini_image_mcp/config.py -> project root).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+_APP_NAME = "gemini-image-mcp"
+
+
+def _user_state_dir() -> Path:
+    """Per-user directory for private state (the cookie cache), outside the output tree.
+
+    The cookie cache holds a live Google session, so it must not live next to the images and
+    gallery, which users routinely share, zip up, or publish.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / _APP_NAME
+
+
+def _env_flag(name: str) -> bool:
+    """A boolean environment variable; unset or anything but 1/true/yes/on means False."""
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _migrate_legacy_cookie_cache(legacy_dir: Path, cookie_dir: Path) -> None:
+    """Move cookie cache files out of the old default location, `<output_dir>/.cookies`.
+
+    Best effort: a failure here only means the next run re-reads cookies from their source.
+    """
+    if not legacy_dir.is_dir() or legacy_dir == cookie_dir:
+        return
+    for cached in legacy_dir.glob(".cached_cookies_*.json"):
+        try:
+            if (cookie_dir / cached.name).exists():
+                cached.unlink()
+            else:
+                shutil.move(str(cached), str(cookie_dir / cached.name))
+        except OSError:
+            pass
+    try:
+        legacy_dir.rmdir()
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True)
@@ -34,6 +79,21 @@ class Settings:
     refresh_interval: float
     cookie_source: str = "auto"
     firefox_cookie_file: str | None = None
+    # Optional GitHub publishing: when `github_repo` ("owner/name") is set, new images are
+    # uploaded there and the gallery records their public raw URL.
+    github_repo: str | None = None
+    github_token: str | None = None
+    github_branch: str | None = None
+    github_path: str = "images"
+    # Off by default: a configured repo is often public, so publishing is opt-in per call
+    # unless the user explicitly turns this on.
+    github_auto_publish: bool = False
+    # Prompts can be private; only put them in public file names/commit messages on request.
+    github_include_prompt: bool = False
+
+    @property
+    def github_enabled(self) -> bool:
+        return bool(self.github_repo)
 
     @classmethod
     def load(cls, env_file: str | Path | None = None) -> "Settings":
@@ -51,9 +111,8 @@ class Settings:
             load_dotenv(dotenv_path=dotenv_path, override=False)
 
         output_dir = Path(os.environ.get("GEMINI_OUTPUT_DIR") or (_PROJECT_ROOT / "output")).resolve()
-        cookie_path = Path(
-            os.environ.get("GEMINI_COOKIE_PATH") or (output_dir / ".cookies")
-        ).resolve()
+        explicit_cookie_path = os.environ.get("GEMINI_COOKIE_PATH")
+        cookie_path = Path(explicit_cookie_path or (_user_state_dir() / "cookies")).resolve()
 
         # gemini-webapi reads this env var itself to persist refreshed cookies across
         # restarts, so it must be exported before a GeminiClient is constructed.
@@ -66,6 +125,15 @@ class Settings:
         # it must exist before the first `save_cookies()` call or refreshed cookies silently
         # fail to persist.
         cookie_path.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            # Owner-only, like ~/.ssh: the cache files are equivalent to a signed-in session.
+            # (On Windows the per-user LOCALAPPDATA default is already private to the user.)
+            try:
+                cookie_path.chmod(0o700)
+            except OSError:
+                pass
+        if not explicit_cookie_path:
+            _migrate_legacy_cookie_cache(output_dir / ".cookies", cookie_path)
 
         timeout_raw = os.environ.get("GEMINI_TIMEOUT")
         try:
@@ -103,6 +171,12 @@ class Settings:
             # "env": environment only. "firefox": always read Firefox's cookie store.
             cookie_source=(os.environ.get("GEMINI_COOKIE_SOURCE") or "auto").strip().lower(),
             firefox_cookie_file=os.environ.get("GEMINI_FIREFOX_COOKIE_FILE") or None,
+            github_repo=(os.environ.get("GEMINI_GITHUB_REPO") or "").strip().strip("/") or None,
+            github_token=os.environ.get("GEMINI_GITHUB_TOKEN") or None,
+            github_branch=os.environ.get("GEMINI_GITHUB_BRANCH") or None,
+            github_path=(os.environ.get("GEMINI_GITHUB_PATH") or "images").strip().strip("/"),
+            github_auto_publish=_env_flag("GEMINI_GITHUB_AUTO_PUBLISH"),
+            github_include_prompt=_env_flag("GEMINI_GITHUB_INCLUDE_PROMPT"),
         )
 
 

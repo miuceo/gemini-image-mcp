@@ -64,9 +64,13 @@ class GeneratedRecord:
     image_path: str
     kind: Literal["generate", "edit"]
     source_images: list[str] = field(default_factory=list)
+    # Public URL of the copy published to GitHub, if any.
+    remote_url: str | None = None
+    # Why publishing failed for this call, if it did. Transient: not written to the manifest.
+    publish_error: str | None = field(default=None, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "id": self.id,
             "prompt": self.prompt,
             "model": self.model,
@@ -75,6 +79,9 @@ class GeneratedRecord:
             "kind": self.kind,
             "source_images": list(self.source_images),
         }
+        if self.remote_url:
+            data["remote_url"] = self.remote_url
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GeneratedRecord":
@@ -86,6 +93,7 @@ class GeneratedRecord:
             image_path=data["image_path"],
             kind=data["kind"],
             source_images=list(data.get("source_images", [])),
+            remote_url=data.get("remote_url") or None,
         )
 
 
@@ -104,8 +112,8 @@ _MAGIC_SUFFIXES: tuple[tuple[bytes, str], ...] = (
 )
 
 
-def _sniff_suffix(path: Path) -> str:
-    """Return the correct file suffix for `path` based on its magic bytes."""
+def _image_suffix(path: Path) -> str | None:
+    """The file suffix matching `path`'s magic bytes, or None if it is not a known image."""
     with path.open("rb") as fh:
         header = fh.read(16)
     if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
@@ -113,7 +121,26 @@ def _sniff_suffix(path: Path) -> str:
     for magic, suffix in _MAGIC_SUFFIXES:
         if header.startswith(magic):
             return suffix
-    return path.suffix or ".png"
+    return None
+
+
+def _sniff_suffix(path: Path) -> str:
+    """Return the correct file suffix for `path` based on its magic bytes."""
+    return _image_suffix(path) or path.suffix or ".png"
+
+
+# Source images are uploaded to Gemini as-is; cap them so a stray path can't ship a huge file.
+_MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _is_within(path: Path, directory: Path) -> bool:
+    """Whether `path` resolves to a location inside `directory` (case-insensitive on Windows)."""
+    target = os.path.normcase(str(path.resolve()))
+    root = os.path.normcase(str(directory.resolve()))
+    try:
+        return os.path.commonpath([target, root]) == root
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def _fix_suffix(path: Path) -> Path:
@@ -180,11 +207,39 @@ def _model_label(model: str | None, settings: Settings) -> str:
     return model or settings.default_model or "default"
 
 
+def _should_publish(publish: bool | None, settings: Settings) -> bool:
+    if not settings.github_enabled:
+        return False
+    return settings.github_auto_publish if publish is None else publish
+
+
+async def _publish_records(records: list[GeneratedRecord], settings: Settings) -> None:
+    """Upload each record's image to GitHub, setting `remote_url` or `publish_error`.
+
+    Never raises for a publishing failure: the image is already saved locally, so a GitHub
+    problem is reported alongside the result instead of failing the whole generation.
+    """
+    from . import github
+
+    for record in records:
+        local_path = settings.output_dir / record.image_path
+        remote_path = github.remote_path_for(local_path, record.prompt, record.id, settings)
+        message = github.commit_message_for(record.prompt, record.id, settings)
+        try:
+            record.remote_url = await github.publish_file(
+                local_path, remote_path, message, settings
+            )
+            record.publish_error = None
+        except github.GitHubPublishError as exc:
+            record.publish_error = str(exc)
+
+
 async def generate_images(
     prompt: str,
     *,
     model: str | None = None,
     settings: Settings | None = None,
+    publish: bool | None = None,
 ) -> list[GeneratedRecord]:
     """Generate one or more images from a text prompt using the Gemini web app.
 
@@ -198,6 +253,9 @@ async def generate_images(
         account's own default model if that is also unset.
     settings: `Settings | None`, optional
         Configuration to use. Defaults to the process-wide settings.
+    publish: `bool | None`, optional
+        Whether to upload the images to the configured GitHub repo. `None` follows
+        `settings.github_auto_publish`; ignored when GitHub publishing is not configured.
 
     Returns
     -------
@@ -256,6 +314,9 @@ async def generate_images(
         for path in saved_paths
     ]
 
+    if _should_publish(publish, settings):
+        await _publish_records(records, settings)
+
     from . import gallery
 
     gallery.append_records(records, settings)
@@ -270,6 +331,7 @@ async def edit_images(
     *,
     model: str | None = None,
     settings: Settings | None = None,
+    publish: bool | None = None,
 ) -> list[GeneratedRecord]:
     """Edit one or more existing images using a text prompt, via a Gemini chat session.
 
@@ -283,6 +345,8 @@ async def edit_images(
         Model name, alias, or id to use. Defaults to `settings.default_model`.
     settings: `Settings | None`, optional
         Configuration to use. Defaults to the process-wide settings.
+    publish: `bool | None`, optional
+        Same as for `generate_images`.
 
     Raises
     ------
@@ -294,12 +358,26 @@ async def edit_images(
     """
     settings = settings or get_settings()
 
+    # Tool arguments can come from a prompt-injected agent, so only real image files are
+    # accepted: anything else (.env, keys, documents) would otherwise be uploaded to Google.
     resolved_inputs: list[Path] = []
+    input_suffixes: list[str] = []
     for raw_path in image_paths:
         candidate = Path(raw_path)
-        if not candidate.exists():
+        if not candidate.is_file():
             raise GeminiGenerationError(f"Source image not found: '{raw_path}'")
+        if candidate.stat().st_size > _MAX_SOURCE_IMAGE_BYTES:
+            raise GeminiGenerationError(
+                f"Source image is larger than {_MAX_SOURCE_IMAGE_BYTES // (1024 * 1024)} MB: "
+                f"'{raw_path}'"
+            )
+        suffix = _image_suffix(candidate)
+        if suffix is None:
+            raise GeminiGenerationError(
+                f"Not a supported image (PNG, JPEG, WEBP or GIF): '{raw_path}'"
+            )
         resolved_inputs.append(candidate)
+        input_suffixes.append(suffix)
 
     images_dir = settings.output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -307,7 +385,7 @@ async def edit_images(
     # Copy any source image not already inside output_dir so the gallery can reference it
     # with a relative path, same as generated images.
     source_relative_paths: list[str] = []
-    for candidate in resolved_inputs:
+    for candidate, suffix in zip(resolved_inputs, input_suffixes):
         resolved = candidate.resolve()
         try:
             resolved.relative_to(settings.output_dir)
@@ -318,7 +396,7 @@ async def edit_images(
         if already_inside:
             source_relative_paths.append(_relative_to_output(resolved, settings))
         else:
-            dest = images_dir / f"{uuid.uuid4().hex}{candidate.suffix or '.png'}"
+            dest = images_dir / f"{uuid.uuid4().hex}{suffix}"
             shutil.copy2(candidate, dest)
             source_relative_paths.append(_relative_to_output(dest, settings))
 
@@ -363,6 +441,9 @@ async def edit_images(
         for path in saved_paths
     ]
 
+    if _should_publish(publish, settings):
+        await _publish_records(records, settings)
+
     from . import gallery
 
     gallery.append_records(records, settings)
@@ -385,3 +466,87 @@ async def list_models(settings: Settings | None = None) -> list[dict[str, str]]:
 
     models = client.list_models() or []
     return [{"display_name": m.display_name, "model_name": m.model_name} for m in models]
+
+
+async def publish_images(
+    image_paths: list[str], settings: Settings | None = None
+) -> list[GeneratedRecord]:
+    """Publish existing images to the configured GitHub repo.
+
+    Each path may be a gallery image (absolute, or relative to `output_dir` like
+    `images/<id>.jpg`) or a record id. Gallery records get their `remote_url` saved to the
+    manifest; any other existing image file is published under a record built on the fly
+    (not added to the gallery). Per-image failures are reported via `publish_error`.
+
+    Only images inside `<output_dir>/images` can be published. Tool arguments may come from a
+    prompt-injected agent, and this uploads to a possibly public repository, so any other
+    path (the cookie cache, `.env`, SSH keys, ...) is refused outright.
+
+    Raises
+    ------
+    `GeminiGenerationError`
+        If GitHub publishing is not configured, a path matches neither a file nor a record,
+        or it points outside the images directory or at a non-image file.
+
+    """
+    settings = settings or get_settings()
+    if not settings.github_enabled:
+        raise GeminiGenerationError(
+            "GitHub publishing is not configured. Set GEMINI_GITHUB_REPO=owner/name in .env."
+        )
+
+    from . import gallery
+
+    known = gallery.load_records(settings)
+    by_path = {
+        (settings.output_dir / r.image_path).resolve(): r for r in known
+    }
+    by_id = {r.id: r for r in known}
+
+    targets: list[GeneratedRecord] = []
+    tracked: list[GeneratedRecord] = []
+    for raw in image_paths:
+        if raw in by_id:
+            record = by_id[raw]
+            tracked.append(record)
+            targets.append(record)
+            continue
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = settings.output_dir / candidate
+        candidate = candidate.resolve()
+        if candidate in by_path:
+            record = by_path[candidate]
+            tracked.append(record)
+        elif candidate.is_file():
+            record = GeneratedRecord(
+                id=uuid.uuid4().hex,
+                prompt=candidate.stem,
+                model="",
+                created_at=_now_iso(),
+                image_path=_relative_to_output(candidate, settings),
+                kind="generate",
+            )
+        else:
+            raise GeminiGenerationError(f"Image not found: '{raw}'")
+        targets.append(record)
+
+    # Checked for gallery records too: their paths come from manifest.json, which is just a
+    # file on disk and could have been edited to point anywhere.
+    images_dir = settings.output_dir / "images"
+    for raw, record in zip(image_paths, targets):
+        local_path = settings.output_dir / record.image_path
+        if not _is_within(local_path, images_dir):
+            raise GeminiGenerationError(
+                f"Refusing to publish '{raw}': only images inside '{images_dir}' can be published."
+            )
+        if not local_path.is_file() or _image_suffix(local_path) is None:
+            raise GeminiGenerationError(f"Refusing to publish '{raw}': not an image file.")
+
+    await _publish_records(targets, settings)
+
+    published = [r for r in tracked if r.remote_url]
+    if published:
+        gallery.append_records(published, settings)
+        gallery.render(settings)
+    return targets

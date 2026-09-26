@@ -149,6 +149,37 @@ async def test_edit_images_missing_source_raises_clear_error(tmp_path, fake_clie
     fake_client.start_chat.assert_not_called()
 
 
+async def test_edit_images_rejects_non_image_source(tmp_path, fake_client, fake_save):
+    settings = _settings(tmp_path)
+    secret = tmp_path / ".env"
+    secret.write_text("GEMINI_1PSID=secret", encoding="utf-8")
+
+    with pytest.raises(GeminiGenerationError, match="Not a supported image"):
+        await core.edit_images("make it nighttime", [str(secret)], settings=settings)
+
+    fake_client.start_chat.assert_not_called()
+    assert list((settings.output_dir / "images").iterdir()) == []
+
+
+async def test_edit_images_rejects_oversized_source(tmp_path, fake_client, fake_save, monkeypatch):
+    settings = _settings(tmp_path)
+    source = tmp_path / "big.png"
+    source.write_bytes(PNG_MAGIC + bytes(64))
+    monkeypatch.setattr(core, "_MAX_SOURCE_IMAGE_BYTES", 32)
+
+    with pytest.raises(GeminiGenerationError, match="larger than"):
+        await core.edit_images("make it nighttime", [str(source)], settings=settings)
+
+    fake_client.start_chat.assert_not_called()
+
+
+async def test_edit_images_rejects_directory(tmp_path, fake_client, fake_save):
+    settings = _settings(tmp_path)
+
+    with pytest.raises(GeminiGenerationError, match="not found"):
+        await core.edit_images("make it nighttime", [str(tmp_path)], settings=settings)
+
+
 async def test_edit_images_builds_records_and_copies_external_source(
     tmp_path, fake_client, fake_save
 ):

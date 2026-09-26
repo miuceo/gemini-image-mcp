@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import pytest
 
+from gemini_image_mcp import config
+
 _GEMINI_ENV_VARS = (
     "GEMINI_1PSID",
     "GEMINI_1PSIDTS",
@@ -24,6 +26,13 @@ _GEMINI_ENV_VARS = (
     "GEMINI_REFRESH_INTERVAL",
     "GEMINI_COOKIE_SOURCE",
     "GEMINI_FIREFOX_COOKIE_FILE",
+    "GEMINI_GITHUB_REPO",
+    "GEMINI_GITHUB_TOKEN",
+    "GEMINI_GITHUB_BRANCH",
+    "GEMINI_GITHUB_PATH",
+    "GEMINI_GITHUB_AUTO_PUBLISH",
+    "GEMINI_GITHUB_INCLUDE_PROMPT",
+    "GITHUB_TOKEN",
 )
 
 
@@ -33,3 +42,11 @@ def _isolate_gemini_env(monkeypatch):
     for var in _GEMINI_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_state_dir(tmp_path, monkeypatch):
+    """Keep `Settings.load()` from creating the real per-user cookie cache directory."""
+    state_dir = tmp_path / "user-state"
+    monkeypatch.setattr(config, "_user_state_dir", lambda: state_dir)
+    return state_dir

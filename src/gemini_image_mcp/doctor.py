@@ -11,7 +11,15 @@ import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
-from .client import GeminiImageError, cookie_source_used, load_firefox_cookies
+from .client import (
+    BROWSERS,
+    BrowserCookieError,
+    GeminiImageError,
+    auto_browsers,
+    cookie_file_for,
+    cookie_source_used,
+    load_browser_cookies,
+)
 from .config import Settings, get_settings
 
 Status = Literal["ok", "warn", "fail", "skip"]
@@ -48,8 +56,14 @@ def _check_cookie_cache(settings: Settings) -> Check:
 
 def _check_cookies(settings: Settings) -> Check:
     source = settings.cookie_source
-    if source not in ("auto", "env", "firefox"):
-        return Check("Cookies", "fail", f"Unknown GEMINI_COOKIE_SOURCE '{source}'.")
+    if source not in ("auto", "env", *BROWSERS):
+        return Check(
+            "Cookies",
+            "fail",
+            f"Unknown GEMINI_COOKIE_SOURCE '{source}'. Use auto, env, or one of: "
+            + ", ".join(BROWSERS)
+            + ".",
+        )
     has_env = bool(settings.secure_1psid)
     if source == "env" or (source == "auto" and has_env):
         if not has_env:
@@ -57,15 +71,25 @@ def _check_cookies(settings: Settings) -> Check:
         if not settings.secure_1psidts:
             return Check("Cookies", "warn", "GEMINI_1PSID is set but GEMINI_1PSIDTS is empty.")
         return Check("Cookies", "ok", "Found in the environment / .env.")
-    psid, _ = load_firefox_cookies(settings.firefox_cookie_file)
-    if not psid:
-        return Check(
-            "Cookies",
-            "fail",
-            "No Gemini cookies in the environment or Firefox. Sign in to "
-            "gemini.google.com in Firefox, or set GEMINI_1PSID / GEMINI_1PSIDTS in .env.",
-        )
-    return Check("Cookies", "ok", "Found in Firefox's cookie store.")
+    browsers = auto_browsers() if source == "auto" else (source,)
+    problems: list[str] = []
+    for browser in browsers:
+        try:
+            load_browser_cookies(browser, cookie_file_for(browser, settings))
+        except BrowserCookieError as exc:
+            if not (source == "auto" and exc.missing_store):
+                problems.append(str(exc))
+            continue
+        return Check("Cookies", "ok", f"Found a Gemini login in {BROWSERS[browser]}.")
+    return Check(
+        "Cookies",
+        "fail",
+        "No Gemini cookies found. "
+        + " ".join(problems)
+        + (" " if problems else "")
+        + "Sign in to gemini.google.com in Firefox or Edge, or set GEMINI_1PSID / "
+        "GEMINI_1PSIDTS in .env.",
+    )
 
 
 async def _check_gemini(settings: Settings) -> Check:

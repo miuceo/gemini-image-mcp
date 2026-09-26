@@ -296,7 +296,7 @@ async def generate_images(
     try:
         output = await client.generate_content(shaped_prompt, model=effective_model)
         if not output.images and _looks_signed_out(output.text):
-            # Session went stale mid-process: rebuild the client (re-reading Firefox's
+            # Session went stale mid-process: rebuild the client (re-reading the browser's
             # cookies when configured) and retry once.
             await reset_client()
             client = await get_client(settings)

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gemini_image_mcp import core, doctor, github, server
-from gemini_image_mcp.client import GeminiAuthError
+from gemini_image_mcp.client import BrowserCookieError, GeminiAuthError
 from gemini_image_mcp.config import Settings
 
 
@@ -82,21 +82,47 @@ def test_missing_psidts_warns(tmp_path):
 
 
 def test_unknown_cookie_source_fails(tmp_path):
-    check = doctor._check_cookies(_settings(tmp_path, cookie_source="chrome"))
+    check = doctor._check_cookies(_settings(tmp_path, cookie_source="netscape"))
     assert check.status == "fail"
-    assert "chrome" in check.detail
+    assert "netscape" in check.detail
 
 
-def test_firefox_cookies_found_or_missing(tmp_path, monkeypatch):
+def _browser_logins(logins: set[str], missing: tuple[str, ...] = ()):
+    def _load(browser, cookie_file=None):
+        if browser in missing:
+            raise BrowserCookieError(f"{browser}: no store", missing_store=True)
+        if browser not in logins:
+            raise BrowserCookieError(f"{browser}: not signed in.")
+        return "psid", "psidts"
+
+    return _load
+
+
+def test_browser_cookies_found_or_missing(tmp_path, monkeypatch):
     settings = _settings(tmp_path, secure_1psid=None)
+    monkeypatch.setattr(doctor, "auto_browsers", lambda: ("firefox", "edge", "chrome"))
 
-    monkeypatch.setattr(doctor, "load_firefox_cookies", lambda _file: ("psid", "psidts"))
-    assert doctor._check_cookies(settings).status == "ok"
+    monkeypatch.setattr(doctor, "load_browser_cookies", _browser_logins({"edge"}))
+    found = doctor._check_cookies(settings)
+    assert found.status == "ok"
+    assert "Edge" in found.detail
 
-    monkeypatch.setattr(doctor, "load_firefox_cookies", lambda _file: (None, None))
+    monkeypatch.setattr(
+        doctor, "load_browser_cookies", _browser_logins(set(), missing=("chrome",))
+    )
     missing = doctor._check_cookies(settings)
     assert missing.status == "fail"
-    assert "Firefox" in missing.detail
+    assert "firefox: not signed in" in missing.detail
+    assert "chrome" not in missing.detail
+
+
+def test_explicit_browser_source_reports_its_problem(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "load_browser_cookies", _browser_logins(set()))
+
+    check = doctor._check_cookies(_settings(tmp_path, secure_1psid=None, cookie_source="chrome"))
+
+    assert check.status == "fail"
+    assert "chrome: not signed in" in check.detail
 
 
 async def test_gemini_sign_in_ok_and_fail(tmp_path, monkeypatch):

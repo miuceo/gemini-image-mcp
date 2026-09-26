@@ -78,7 +78,8 @@ class Settings:
     proxy: str | None
     refresh_interval: float
     cookie_source: str = "auto"
-    firefox_cookie_file: str | None = None
+    # A specific profile's cookie database for the browser named by `cookie_source`.
+    browser_cookie_file: str | None = None
     # Optional GitHub publishing: when `github_repo` ("owner/name") is set, new images are
     # uploaded there and the gallery records their public raw URL.
     github_repo: str | None = None
@@ -167,10 +168,14 @@ class Settings:
             timeout=timeout,
             proxy=os.environ.get("GEMINI_PROXY") or None,
             refresh_interval=refresh_interval,
-            # "auto": use GEMINI_1PSID from the environment if set, else read Firefox.
-            # "env": environment only. "firefox": always read Firefox's cookie store.
+            # "auto": use GEMINI_1PSID from the environment if set, else probe browsers.
+            # "env": environment only. A browser name ("firefox", "edge", ...): only that
+            # browser's cookie store.
             cookie_source=(os.environ.get("GEMINI_COOKIE_SOURCE") or "auto").strip().lower(),
-            firefox_cookie_file=os.environ.get("GEMINI_FIREFOX_COOKIE_FILE") or None,
+            browser_cookie_file=os.environ.get("GEMINI_BROWSER_COOKIE_FILE")
+            # Older name, from when only Firefox was supported.
+            or os.environ.get("GEMINI_FIREFOX_COOKIE_FILE")
+            or None,
             github_repo=(os.environ.get("GEMINI_GITHUB_REPO") or "").strip().strip("/") or None,
             github_token=os.environ.get("GEMINI_GITHUB_TOKEN") or None,
             github_branch=os.environ.get("GEMINI_GITHUB_BRANCH") or None,

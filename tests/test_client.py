@@ -116,7 +116,7 @@ def _settings(**overrides) -> Settings:
         proxy=None,
         refresh_interval=240.0,
         cookie_source="auto",
-        firefox_cookie_file=None,
+        browser_cookie_file=None,
     )
     base.update(overrides)
     return Settings(**base)
@@ -133,9 +133,23 @@ def fake_init(monkeypatch):
         return object()
 
     monkeypatch.setattr(client_mod, "_init_client", _fake)
-    monkeypatch.setattr(client_mod, "load_firefox_cookies", lambda f=None: ("ff", "ffts"))
+    monkeypatch.setattr(client_mod, "load_browser_cookies", _fake_browsers({"firefox": "ff"}))
+    monkeypatch.setattr(client_mod, "auto_browsers", lambda: ("firefox", "edge", "chrome"))
     monkeypatch.setattr(client_mod, "_client", None)
     return calls
+
+
+def _fake_browsers(logins: dict[str, str], missing: tuple[str, ...] = ()):
+    """A `load_browser_cookies` stand-in: `logins` maps browser -> 1PSID value."""
+
+    def _load(browser, cookie_file=None):
+        if browser in missing:
+            raise client_mod.BrowserCookieError(f"{browser}: no store", missing_store=True)
+        if browser not in logins:
+            raise client_mod.BrowserCookieError(f"{browser}: not signed in")
+        return logins[browser], f"{logins[browser]}ts"
+
+    return _load
 
 
 async def test_auto_without_env_cookies_reads_firefox(fake_init):
@@ -157,3 +171,118 @@ async def test_env_source_never_reads_firefox(fake_init):
     with pytest.raises(GeminiAuthError):
         await client_mod.get_client(_settings(secure_1psid="stale", cookie_source="env"))
     assert fake_init == [("stale", None)]
+
+
+async def test_auto_uses_next_browser_with_a_login(fake_init, monkeypatch):
+    monkeypatch.setattr(client_mod, "load_browser_cookies", _fake_browsers({"edge": "ed"}))
+
+    await client_mod.get_client(_settings())
+
+    assert fake_init == [("ed", "edts")]
+    assert client_mod.cookie_source_used() == "Edge"
+
+
+async def test_auto_skips_browser_whose_login_is_rejected(fake_init, monkeypatch):
+    monkeypatch.setattr(
+        client_mod, "load_browser_cookies", _fake_browsers({"firefox": "stale", "edge": "ed"})
+    )
+
+    await client_mod.get_client(_settings())
+
+    assert fake_init == [("stale", "stalets"), ("ed", "edts")]
+
+
+async def test_explicit_browser_reads_only_that_browser(fake_init, monkeypatch):
+    monkeypatch.setattr(client_mod, "load_browser_cookies", _fake_browsers({"firefox": "ff"}))
+
+    with pytest.raises(GeminiAuthError, match="edge: not signed in"):
+        await client_mod.get_client(_settings(cookie_source="edge"))
+    assert fake_init == []
+
+
+async def test_auto_error_lists_reasons_but_not_missing_browsers(fake_init, monkeypatch):
+    monkeypatch.setattr(
+        client_mod, "load_browser_cookies", _fake_browsers({}, missing=("chrome",))
+    )
+
+    with pytest.raises(GeminiAuthError) as excinfo:
+        await client_mod.get_client(_settings())
+
+    message = str(excinfo.value)
+    assert "firefox: not signed in" in message and "edge: not signed in" in message
+    assert "chrome" not in message
+
+
+async def test_unknown_cookie_source_is_rejected(fake_init):
+    with pytest.raises(GeminiAuthError, match="Unknown GEMINI_COOKIE_SOURCE"):
+        await client_mod.get_client(_settings(cookie_source="netscape"))
+
+
+class _Cookie:
+    def __init__(self, name, value, domain=".google.com"):
+        self.name, self.value, self.domain = name, value, domain
+
+
+def _fake_cookie3(monkeypatch, loader):
+    import sys
+    import types
+
+    module = types.ModuleType("browser_cookie3")
+    module.edge = loader
+    monkeypatch.setitem(sys.modules, "browser_cookie3", module)
+
+
+def test_load_browser_cookies_reads_gemini_cookies(monkeypatch):
+    jar = [
+        _Cookie("__Secure-1PSID", "p"),
+        _Cookie("__Secure-1PSIDTS", "t"),
+        _Cookie("__Secure-1PSID", "other", domain=".example.com"),
+    ]
+    _fake_cookie3(monkeypatch, lambda cookie_file=None, domain_name="": jar)
+
+    assert client_mod.load_browser_cookies("edge") == ("p", "t")
+
+
+def test_load_browser_cookies_not_signed_in(monkeypatch):
+    _fake_cookie3(monkeypatch, lambda cookie_file=None, domain_name="": [])
+
+    with pytest.raises(client_mod.BrowserCookieError, match="not signed in"):
+        client_mod.load_browser_cookies("edge")
+
+
+def test_load_browser_cookies_explains_app_bound_encryption(monkeypatch):
+    class RequiresAdminError(Exception):
+        pass
+
+    def _raise(cookie_file=None, domain_name=""):
+        raise RequiresAdminError("This operation requires admin.")
+
+    _fake_cookie3(monkeypatch, _raise)
+
+    with pytest.raises(client_mod.BrowserCookieError, match="administrator") as excinfo:
+        client_mod.load_browser_cookies("edge")
+    assert not excinfo.value.missing_store
+
+
+def test_load_browser_cookies_marks_missing_store(monkeypatch):
+    class BrowserCookieError(Exception):
+        pass
+
+    def _raise(cookie_file=None, domain_name=""):
+        raise BrowserCookieError("Failed to find cookies")
+
+    _fake_cookie3(monkeypatch, _raise)
+
+    with pytest.raises(client_mod.BrowserCookieError) as excinfo:
+        client_mod.load_browser_cookies("edge")
+    assert excinfo.value.missing_store
+
+
+def test_cookie_file_applies_to_chosen_browser_only():
+    auto = _settings(browser_cookie_file="x.sqlite")
+    edge = _settings(cookie_source="edge", browser_cookie_file="x.db")
+
+    assert client_mod.cookie_file_for("firefox", auto) == "x.sqlite"
+    assert client_mod.cookie_file_for("edge", auto) is None
+    assert client_mod.cookie_file_for("edge", edge) == "x.db"
+    assert client_mod.cookie_file_for("firefox", edge) is None

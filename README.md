@@ -91,19 +91,37 @@ error message (e.g. about missing/expired cookies) on failure.
 6. Copy `.env.example` to `.env` and paste the two values into `GEMINI_1PSID` and
    `GEMINI_1PSIDTS`.
 
-### Automatic cookies from Firefox (recommended)
+### Automatic cookies from your browser (recommended)
 
-Instead of pasting cookies, sign in to https://gemini.google.com in Firefox and leave
-`GEMINI_1PSID` / `GEMINI_1PSIDTS` empty. The server reads both cookies straight from
-Firefox's cookie store (via `browser-cookie3`) at startup, and again whenever Gemini
-reports the session as signed out - so a fresh Firefox login is picked up without
-touching `.env`. Firefox doesn't need to be running. Stay signed in there (no private
-window, don't clear its cookies).
+Instead of pasting cookies, sign in to https://gemini.google.com in a supported browser
+and leave `GEMINI_1PSID` / `GEMINI_1PSIDTS` empty. The server reads both cookies straight
+from the browser's cookie store (via `browser-cookie3`) at startup, and again whenever
+Gemini reports the session as signed out - so a fresh login is picked up without touching
+`.env`. The browser doesn't need to be running. Stay signed in there (no private window,
+don't clear its cookies).
 
-- `GEMINI_COOKIE_SOURCE` - `auto` (default: `.env` values if set, else Firefox, with
-  Firefox as fallback when they're stale), `env`, or `firefox`.
-- `GEMINI_FIREFOX_COOKIE_FILE` - path to a specific profile's `cookies.sqlite` if you
-  have several Firefox profiles.
+In `auto` mode the server tries Firefox, LibreWolf, Edge, Chrome, Brave, Chromium, Vivaldi
+and Opera in that order, and uses the first one whose Gemini login works. On macOS only
+Firefox and LibreWolf are tried automatically, because reading Chromium-based browsers
+there triggers a Keychain password prompt. Name the browser explicitly to use it anyway.
+
+| Browser | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Firefox, LibreWolf | Yes | Yes | Yes |
+| Edge, Brave, Vivaldi, Opera, Chromium | Yes | Yes (Keychain prompt) | Yes |
+| Chrome | **No** - see below | Yes (Keychain prompt) | Yes |
+| Safari | - | Yes (with Full Disk Access) | - |
+
+- `GEMINI_COOKIE_SOURCE` - `auto` (default: `.env` values if set, else the browsers
+  above, also used as a fallback when the `.env` values are stale), `env` (only `.env`),
+  or one browser: `firefox`, `librewolf`, `edge`, `chrome`, `brave`, `chromium`,
+  `vivaldi`, `opera`, `safari`.
+- `GEMINI_BROWSER_COOKIE_FILE` - path to a specific profile's cookie database, if you have
+  several profiles (for `auto`, it applies to Firefox). `GEMINI_FIREFOX_COOKIE_FILE` still
+  works as the older name.
+
+Run `uv run gemini-image-mcp doctor --offline` to see which browser was found, or why
+none could be read.
 
 ### Cookie lifetime
 
@@ -113,13 +131,15 @@ while the server is running and persists the refreshed value to the path in
 `~/Library/Application Support/gemini-image-mcp/cookies` on macOS,
 `~/.local/state/gemini-image-mcp/cookies` on Linux), so in the happy path you only paste
 cookies once. The cache is kept outside `output/` on purpose, so sharing or publishing
-your images never exposes your session. Chrome's session credentials tend to be shorter-lived than Firefox's; if you
-find yourself re-pasting often, a dedicated Firefox profile kept signed in to Gemini is a
-more durable workaround.
+your images never exposes your session. If you paste cookies by hand
+and find yourself re-pasting often, keeping Firefox or Edge signed in to Gemini and
+letting the server read them is a more durable workaround.
 
-**Chrome cookies cannot be imported automatically.** Since Chrome 127, Windows encrypts
-its cookie store with app-bound encryption that tools like `browser-cookie3` cannot
-decrypt. There is no shortcut here — copy the two values by hand as above.
+**Chrome on Windows can't be read automatically.** Since Chrome 127, Chrome on Windows
+encrypts its cookies with app-bound encryption, which can only be decrypted with
+administrator rights, and an MCP server should never run as administrator. If Chrome is
+your main browser, sign in to Gemini once in Firefox or Edge just for this server, or copy
+the two values by hand as above.
 
 ### These cookies are your account
 
@@ -247,7 +267,7 @@ It checks, in order:
 | --- | --- |
 | Output directory | `GEMINI_OUTPUT_DIR` exists and is writable. |
 | Cookie cache | The cache is outside the output folder (so sharing images never shares your session). |
-| Cookies | `GEMINI_1PSID` / `GEMINI_1PSIDTS` are set, or Firefox has a Gemini login. |
+| Cookies | `GEMINI_1PSID` / `GEMINI_1PSIDTS` are set, or a supported browser has a Gemini login (and if not, why each browser couldn't be read). |
 | Gemini sign-in | The cookies actually work, and how many models the account can use. |
 | Gallery | How many images the manifest holds, and whether a corrupt one was set aside. |
 | GitHub publishing | Where the token comes from, that it can push to the repo, and whether the repo is public. |

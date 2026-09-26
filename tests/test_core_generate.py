@@ -180,6 +180,36 @@ async def test_edit_images_rejects_directory(tmp_path, fake_client, fake_save):
         await core.edit_images("make it nighttime", [str(tmp_path)], settings=settings)
 
 
+async def test_edit_images_failure_leaves_no_copied_sources(tmp_path, fake_client, fake_save):
+    settings = _settings(tmp_path)
+    source = tmp_path / "my_photo.png"
+    source.write_bytes(PNG_MAGIC)
+    fake_chat = Mock()
+    fake_chat.send_message = AsyncMock(return_value=SimpleNamespace(images=[], text="no"))
+    fake_client.start_chat.return_value = fake_chat
+
+    with pytest.raises(GeminiGenerationError):
+        await core.edit_images("make it nighttime", [str(source)], settings=settings)
+
+    assert list((settings.output_dir / "images").iterdir()) == []
+
+
+@pytest.mark.parametrize("prompt", ["", "   ", "x" * 8001])
+async def test_generate_images_rejects_empty_or_huge_prompt(tmp_path, fake_client, prompt):
+    with pytest.raises(GeminiGenerationError, match="prompt"):
+        await core.generate_images(prompt, settings=_settings(tmp_path))
+    fake_client.generate_content.assert_not_called()
+
+
+async def test_edit_images_limits_number_of_sources(tmp_path, fake_client):
+    settings = _settings(tmp_path)
+    with pytest.raises(GeminiGenerationError, match="No source images"):
+        await core.edit_images("x", [], settings=settings)
+    with pytest.raises(GeminiGenerationError, match="Too many"):
+        await core.edit_images("x", ["a.png"] * 11, settings=settings)
+    fake_client.start_chat.assert_not_called()
+
+
 async def test_edit_images_builds_records_and_copies_external_source(
     tmp_path, fake_client, fake_save
 ):

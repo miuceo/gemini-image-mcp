@@ -192,6 +192,30 @@ async def test_publish_file_overwrites_existing_path_with_sha(tmp_path, monkeypa
     assert fake.puts[1][2]["sha"] == "abc123"
 
 
+async def test_publish_file_reports_422_when_nothing_to_overwrite(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(method, url, token, body=None):
+        calls.append(method)
+        if method == "PUT":
+            raise _http_error(422, "Invalid request")
+        return {}  # no existing file, so no sha to retry with
+
+    monkeypatch.setattr(github, "_request", fake)
+    settings = _settings(tmp_path)
+    image = tmp_path / "a.jpg"
+    image.write_bytes(JPEG_MAGIC)
+
+    with pytest.raises(github.GitHubPublishError, match="422"):
+        await github.publish_file(image, "images/a.jpg", "m", settings)
+    assert calls == ["PUT", "GET"]
+
+
+async def test_publish_images_limits_batch_size(tmp_path, fake_github):
+    with pytest.raises(GeminiGenerationError, match="at most"):
+        await core.publish_images(["x"] * 51, settings=_settings(tmp_path))
+
+
 async def test_publish_file_maps_auth_errors(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise _http_error(401, "Bad credentials")

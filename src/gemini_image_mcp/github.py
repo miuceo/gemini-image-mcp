@@ -161,17 +161,22 @@ def _publish_sync(local_path: Path, remote_path: str, message: str, settings: Se
                 _request("PUT", url, token, body)
                 break
             except urllib.error.HTTPError as exc:
+                if exc.code not in (409, 422) or attempt == _CONFLICT_RETRIES:
+                    raise
                 if exc.code == 422:
-                    # The path already exists (e.g. re-publishing): update it in place,
-                    # which requires the current blob sha.
-                    existing = _request(
-                        "GET", f"{url}?ref={urllib.parse.quote(branch)}", token
-                    )
-                    body["sha"] = existing.get("sha")
-                elif exc.code != 409 or attempt == _CONFLICT_RETRIES:
-                    raise
-                if attempt == _CONFLICT_RETRIES:
-                    raise
+                    # Usually the path already exists (e.g. re-publishing): update it in
+                    # place, which requires the current blob sha. If there is no file there
+                    # to update, the 422 meant something else - report it, don't loop.
+                    try:
+                        existing = _request(
+                            "GET", f"{url}?ref={urllib.parse.quote(branch)}", token
+                        )
+                    except urllib.error.HTTPError:
+                        raise exc from None
+                    sha = existing.get("sha") if isinstance(existing, dict) else None
+                    if not sha:
+                        raise
+                    body["sha"] = sha
                 time.sleep(0.5 * (attempt + 1))
     except urllib.error.HTTPError as exc:
         raise GitHubPublishError(_http_error_message(exc)) from exc

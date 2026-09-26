@@ -129,6 +129,21 @@ def _sniff_suffix(path: Path) -> str:
     return _image_suffix(path) or path.suffix or ".png"
 
 
+# Upper bounds on tool arguments, which may come from a confused or prompt-injected agent.
+_MAX_PROMPT_CHARS = 8000
+_MAX_EDIT_IMAGES = 10
+_MAX_PUBLISH_IMAGES = 50
+
+
+def _check_prompt(prompt: str) -> None:
+    if not prompt or not prompt.strip():
+        raise GeminiGenerationError("The prompt is empty.")
+    if len(prompt) > _MAX_PROMPT_CHARS:
+        raise GeminiGenerationError(
+            f"The prompt is {len(prompt)} characters long; the limit is {_MAX_PROMPT_CHARS}."
+        )
+
+
 # Source images are uploaded to Gemini as-is; cap them so a stray path can't ship a huge file.
 _MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -271,6 +286,7 @@ async def generate_images(
         response, which usually explains the refusal - region/age restriction, safety block).
 
     """
+    _check_prompt(prompt)
     settings = settings or get_settings()
     client = await get_client(settings)
 
@@ -356,6 +372,13 @@ async def edit_images(
         If Gemini session cookies are missing or invalid.
 
     """
+    _check_prompt(prompt)
+    if not image_paths:
+        raise GeminiGenerationError("No source images were given to edit.")
+    if len(image_paths) > _MAX_EDIT_IMAGES:
+        raise GeminiGenerationError(
+            f"Too many source images ({len(image_paths)}); the limit is {_MAX_EDIT_IMAGES}."
+        )
     settings = settings or get_settings()
 
     # Tool arguments can come from a prompt-injected agent, so only real image files are
@@ -378,27 +401,6 @@ async def edit_images(
             )
         resolved_inputs.append(candidate)
         input_suffixes.append(suffix)
-
-    images_dir = settings.output_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy any source image not already inside output_dir so the gallery can reference it
-    # with a relative path, same as generated images.
-    source_relative_paths: list[str] = []
-    for candidate, suffix in zip(resolved_inputs, input_suffixes):
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(settings.output_dir)
-            already_inside = True
-        except ValueError:
-            already_inside = False
-
-        if already_inside:
-            source_relative_paths.append(_relative_to_output(resolved, settings))
-        else:
-            dest = images_dir / f"{uuid.uuid4().hex}{suffix}"
-            shutil.copy2(candidate, dest)
-            source_relative_paths.append(_relative_to_output(dest, settings))
 
     client = await get_client(settings)
     effective_model = model or settings.default_model
@@ -423,6 +425,20 @@ async def edit_images(
             "Gemini did not return any edited images for this prompt. "
             f"Model response: {output.text!r}"
         )
+
+    # Only now, with an edit in hand, copy any source image not already inside output_dir so
+    # the gallery can reference it with a relative path (a failed edit leaves no stray copies).
+    images_dir = settings.output_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    source_relative_paths: list[str] = []
+    for candidate, suffix in zip(resolved_inputs, input_suffixes):
+        resolved = candidate.resolve()
+        if _is_within(resolved, settings.output_dir):
+            source_relative_paths.append(_relative_to_output(resolved, settings))
+        else:
+            dest = images_dir / f"{uuid.uuid4().hex}{suffix}"
+            shutil.copy2(candidate, dest)
+            source_relative_paths.append(_relative_to_output(dest, settings))
 
     saved_paths = await _save_generated_images(generated_only, settings)
 
@@ -493,6 +509,10 @@ async def publish_images(
     if not settings.github_enabled:
         raise GeminiGenerationError(
             "GitHub publishing is not configured. Set GEMINI_GITHUB_REPO=owner/name in .env."
+        )
+    if len(image_paths) > _MAX_PUBLISH_IMAGES:
+        raise GeminiGenerationError(
+            f"Too many images ({len(image_paths)}); publish at most {_MAX_PUBLISH_IMAGES} at once."
         )
 
     from . import gallery

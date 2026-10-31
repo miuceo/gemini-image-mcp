@@ -35,7 +35,7 @@ gemini-image-mcp = "gemini_image_mcp.server:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
+    "pytest-asyncio>=1.4.1",
 ]
 
 [build-system]

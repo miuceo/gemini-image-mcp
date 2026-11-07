@@ -42,7 +42,11 @@ _token_cache: str | None = None
 
 
 def _resolve_token(settings: Settings) -> str:
-    """Token from settings, then GITHUB_TOKEN, then the GitHub CLI's stored login."""
+    """Token from settings, then GITHUB_TOKEN, then (only if allowed) the GitHub CLI's login.
+
+    The `gh` login is a broad OAuth token that usually reaches every repository the user can
+    write to, so it is never used implicitly: set GEMINI_GITHUB_ALLOW_GH_CLI=true to opt in.
+    """
     global _token_cache
     if settings.github_token:
         return settings.github_token
@@ -52,7 +56,7 @@ def _resolve_token(settings: Settings) -> str:
     if _token_cache:
         return _token_cache
 
-    gh = shutil.which("gh")
+    gh = shutil.which("gh") if settings.github_allow_gh_cli else None
     if gh:
         try:
             # capture_output keeps gh off our stdout, which carries the MCP protocol.
@@ -66,8 +70,11 @@ def _resolve_token(settings: Settings) -> str:
             return _token_cache
 
     raise GitHubPublishError(
-        "No GitHub token found. Set GEMINI_GITHUB_TOKEN (or GITHUB_TOKEN), or sign in with "
-        "the GitHub CLI (`gh auth login`)."
+        "No GitHub token found. Create a fine-grained personal access token limited to the "
+        f"'{settings.github_repo or 'images'}' repository with 'Contents: Read and write' "
+        "(https://github.com/settings/personal-access-tokens/new) and set it as "
+        "GEMINI_GITHUB_TOKEN in .env. (To use your `gh` login instead, which usually reaches "
+        "ALL your repositories, set GEMINI_GITHUB_ALLOW_GH_CLI=true.)"
     )
 
 

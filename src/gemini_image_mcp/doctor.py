@@ -7,6 +7,7 @@ this module MUST NOT import anything from `mcp`.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from dataclasses import dataclass
 from typing import Literal
@@ -96,7 +97,14 @@ async def _check_gemini(settings: Settings) -> Check:
     from .core import list_models
 
     try:
-        models = await list_models(settings=settings)
+        models = await asyncio.wait_for(list_models(settings=settings), settings.init_timeout + 10)
+    except asyncio.TimeoutError:
+        return Check(
+            "Gemini sign-in",
+            "fail",
+            f"No answer from gemini.google.com within {settings.init_timeout + 10:.0f}s "
+            "(network, proxy or a hung cookie store).",
+        )
     except GeminiImageError as exc:
         return Check("Gemini sign-in", "fail", str(exc))
     return Check(
@@ -147,14 +155,49 @@ async def _check_github(settings: Settings, online: bool) -> Check:
             return Check("GitHub publishing", "fail", "The token cannot push to that repository.")
         if not info.get("private"):
             notes.append("repository is PUBLIC")
+            if settings.github_auto_publish:
+                status = "warn"
+                notes.append(
+                    "auto-publish sends EVERY image (drafts, client work) to this public repo; "
+                    "set GEMINI_GITHUB_AUTO_PUBLISH=false and publish on request"
+                )
             if settings.github_include_prompt:
                 status = "warn"
                 notes.append("prompts go into public file names/commits (GEMINI_GITHUB_INCLUDE_PROMPT)")
     return Check("GitHub publishing", status, "; ".join(notes) + ".")
 
 
-async def run_checks(settings: Settings | None = None, *, online: bool = True) -> list[Check]:
-    """Run every check. `online=False` skips the network calls to Gemini and GitHub."""
+async def _check_generation(settings: Settings) -> Check:
+    """Generate one tiny test image end to end (uses one generation of the account quota)."""
+    from .core import generate_images
+
+    budget = min(settings.job_timeout, 100.0)
+    try:
+        records = await asyncio.wait_for(
+            generate_images(
+                "a single small plain red circle centered on a white background, flat",
+                settings=settings,
+                publish=False,
+                project="_doctor",
+                tags=["doctor"],
+            ),
+            budget,
+        )
+    except asyncio.TimeoutError:
+        return Check("Test generation", "fail", f"No image within {budget:.0f}s.")
+    except GeminiImageError as exc:
+        return Check("Test generation", "fail", str(exc))
+    path = settings.output_dir / records[0].image_path if records else None
+    return Check("Test generation", "ok", f"Generated {len(records)} image(s): {path}")
+
+
+async def run_checks(
+    settings: Settings | None = None, *, online: bool = True, test_generation: bool = False
+) -> list[Check]:
+    """Run every check. `online=False` skips the network calls to Gemini and GitHub.
+
+    `test_generation=True` also generates one tiny image end to end.
+    """
     settings = settings or get_settings()
     checks = [
         _check_output_dir(settings),
@@ -165,6 +208,8 @@ async def run_checks(settings: Settings | None = None, *, online: bool = True) -
         checks.append(await _check_gemini(settings))
     else:
         checks.append(Check("Gemini sign-in", "skip", "Offline mode."))
+    if online and test_generation and checks[-1].status == "ok":
+        checks.append(await _check_generation(settings))
     checks.append(_check_gallery(settings))
     checks.append(await _check_github(settings, online))
     return checks

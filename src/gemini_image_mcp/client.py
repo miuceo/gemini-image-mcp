@@ -44,6 +44,10 @@ class GeminiGenerationError(GeminiImageError):
     """Raised when content/image generation fails or returns no usable output."""
 
 
+class GeminiTimeoutError(GeminiGenerationError):
+    """Raised when a Gemini step (sign-in, generation, download) exceeds its time limit."""
+
+
 _AUTH_ERROR_MESSAGE = (
     "Gemini authentication failed. Your session cookies are missing, expired, or invalid.\n"
     "You need to supply two cookies from a logged-in gemini.google.com session:\n"
@@ -172,7 +176,9 @@ def map_library_error(exc: Exception) -> GeminiImageError:
         return GeminiUsageLimitError(
             f"Temporarily blocked by Gemini (rate limited): {exc}"
         )
-    if isinstance(exc, (LibTimeoutError, ModelInvalidError, APIError, GeminiError)):
+    if isinstance(exc, LibTimeoutError):
+        return GeminiTimeoutError(str(exc) or "Gemini request timed out.")
+    if isinstance(exc, (ModelInvalidError, APIError, GeminiError)):
         return GeminiGenerationError(str(exc) or f"{type(exc).__name__} from gemini_webapi.")
     # Unknown exception type: wrap it rather than letting a raw third-party exception
     # (or bare Exception) leak out of this layer's public API.
@@ -276,7 +282,12 @@ async def _init_from_browsers(
     for browser in browsers:
         label = BROWSERS[browser]
         try:
-            psid, psidts = load_browser_cookies(browser, cookie_file_for(browser, settings))
+            # browser_cookie3 does blocking file I/O and DPAPI/keyring calls; run it on a worker
+            # thread so a slow cookie store can't freeze the event loop (and every other tool
+            # call this server is handling).
+            psid, psidts = await asyncio.to_thread(
+                load_browser_cookies, browser, cookie_file_for(browser, settings)
+            )
         except BrowserCookieError as exc:
             if not (probing and exc.missing_store):
                 problems.append(str(exc))
@@ -303,12 +314,24 @@ async def _init_client(
         proxy=settings.proxy,
     )
     try:
-        await client.init(
-            timeout=settings.timeout,
-            auto_close=False,
-            auto_refresh=True,
-            refresh_interval=settings.refresh_interval,
+        await asyncio.wait_for(
+            client.init(
+                timeout=settings.timeout,
+                auto_close=False,
+                auto_refresh=True,
+                refresh_interval=settings.refresh_interval,
+            ),
+            timeout=settings.init_timeout,
         )
+    except asyncio.TimeoutError:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+        raise GeminiTimeoutError(
+            f"Signing in to Gemini took longer than {settings.init_timeout:.0f}s. "
+            "gemini.google.com may be slow or unreachable (check the network / GEMINI_PROXY)."
+        ) from None
     except Exception as exc:  # noqa: BLE001 - translated deliberately at this boundary
         raise map_library_error(exc) from exc
     return client

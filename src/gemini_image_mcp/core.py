@@ -28,6 +28,7 @@ from .client import (
     get_client,
     map_library_error,
     reset_client,
+    session_dead,
 )
 from .config import Settings, get_settings
 
@@ -402,8 +403,14 @@ async def generate_images(
 
     async with _generation_slot(settings):
         try:
-            output = await client.generate_content(shaped_prompt, model=effective_model)
-            if not output.images and _looks_signed_out(output.text):
+            try:
+                output = await client.generate_content(shaped_prompt, model=effective_model)
+                stale = not output.images and _looks_signed_out(output.text)
+            except Exception:
+                if not session_dead(client):
+                    raise
+                stale = True
+            if stale:
                 # Session went stale mid-process: rebuild the client (re-reading the browser's
                 # cookies when configured) and retry once.
                 await reset_client()
@@ -530,8 +537,14 @@ async def edit_images(
     async with _generation_slot(settings):
         chat = client.start_chat(model=effective_model)
         try:
-            output = await chat.send_message(message, files=files)
-            if not output.images and _looks_signed_out(output.text):
+            try:
+                output = await chat.send_message(message, files=files)
+                stale = not output.images and _looks_signed_out(output.text)
+            except Exception:
+                if not session_dead(client):
+                    raise
+                stale = True
+            if stale:
                 await reset_client()
                 client = await get_client(settings)
                 chat = client.start_chat(model=effective_model)

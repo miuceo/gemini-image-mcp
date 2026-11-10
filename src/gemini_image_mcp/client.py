@@ -12,6 +12,7 @@ import asyncio
 import sys
 
 from gemini_webapi import GeminiClient
+from gemini_webapi.constants import AccountStatus
 from gemini_webapi.exceptions import (
     APIError,
     AuthError,
@@ -191,6 +192,15 @@ _client_lock = asyncio.Lock()
 _cookie_source_used: str | None = None
 
 
+def session_dead(client: object) -> bool:
+    """Whether Gemini marked this client's session UNAUTHENTICATED.
+
+    gemini_webapi keeps that status for the client's whole life (every later call fails with
+    "Permission denied"), so such a client must be rebuilt, not reused.
+    """
+    return getattr(client, "account_status", None) == AccountStatus.UNAUTHENTICATED
+
+
 def cookie_source_used() -> str | None:
     """Where the live client's cookies came from ("environment", "Firefox", ...), if any."""
     return _cookie_source_used if _client is not None else None
@@ -217,10 +227,17 @@ async def get_client(settings: Settings | None = None) -> GeminiClient:
     """
     global _client, _cookie_source_used
 
-    if _client is not None:
+    if _client is not None and not session_dead(_client):
         return _client
 
     async with _client_lock:
+        if _client is not None and session_dead(_client):
+            # The session died mid-process: drop it so cookies are re-read below.
+            try:
+                await _client.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup of a dead session
+                pass
+            _client = None
         # Re-check after acquiring the lock: another caller may have finished init already.
         if _client is not None:
             return _client
@@ -334,4 +351,12 @@ async def _init_client(
         ) from None
     except Exception as exc:  # noqa: BLE001 - translated deliberately at this boundary
         raise map_library_error(exc) from exc
+    if session_dead(client):
+        # init() accepts a signed-out (guest) session; treat it as a failed login so the
+        # next browser is tried instead of every generation failing later.
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+        raise GeminiAuthError(_AUTH_ERROR_MESSAGE)
     return client

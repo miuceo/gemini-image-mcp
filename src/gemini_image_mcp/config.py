@@ -91,6 +91,18 @@ class Settings:
     github_auto_publish: bool = False
     # Prompts can be private; only put them in public file names/commit messages on request.
     github_include_prompt: bool = False
+    # The `gh auth token` fallback usually grants access to ALL of the user's repositories, so
+    # it is only used when explicitly allowed; otherwise a fine-grained token is required.
+    github_allow_gh_cli: bool = False
+    # Upper bound on signing in to Gemini (cookie lookup + access-token fetch), in seconds.
+    init_timeout: float = 45.0
+    # How long the synchronous `generate_image` / `edit_image` tools wait before handing back
+    # a job id instead. Kept well under the ~120 s after which MCP bridges give up on a call.
+    sync_wait: float = 85.0
+    # Hard cap on one generation/edit job (request + download + post-processing), in seconds.
+    job_timeout: float = 300.0
+    # Generations run at most this many at a time per process (avoids tripping rate limits).
+    max_concurrent: int = 1
 
     @property
     def github_enabled(self) -> bool:
@@ -159,6 +171,12 @@ class Settings:
         except ValueError:
             refresh_interval = 240.0
 
+        def _float(name: str, default: float) -> float:
+            try:
+                return float(os.environ.get(name) or default)
+            except ValueError:
+                return default
+
         return cls(
             secure_1psid=os.environ.get("GEMINI_1PSID") or None,
             secure_1psidts=os.environ.get("GEMINI_1PSIDTS") or None,
@@ -182,6 +200,11 @@ class Settings:
             github_path=(os.environ.get("GEMINI_GITHUB_PATH") or "images").strip().strip("/"),
             github_auto_publish=_env_flag("GEMINI_GITHUB_AUTO_PUBLISH"),
             github_include_prompt=_env_flag("GEMINI_GITHUB_INCLUDE_PROMPT"),
+            github_allow_gh_cli=_env_flag("GEMINI_GITHUB_ALLOW_GH_CLI"),
+            init_timeout=_float("GEMINI_INIT_TIMEOUT", 45.0),
+            sync_wait=_float("GEMINI_SYNC_WAIT", 85.0),
+            job_timeout=_float("GEMINI_JOB_TIMEOUT", 300.0),
+            max_concurrent=max(1, int(_float("GEMINI_MAX_CONCURRENT", 1))),
         )
 
 

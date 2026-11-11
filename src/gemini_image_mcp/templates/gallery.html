@@ -404,6 +404,14 @@
   .chip.generate { color: var(--generate); }
   .chip.edit { color: var(--edit); }
   .chip.published { color: var(--published); }
+  .labels { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
+  .label {
+    font-size: 11px; line-height: 1.6; padding: 0 7px; border-radius: 999px;
+    border: 1px solid var(--border, rgba(127,127,127,.3)); opacity: .85; cursor: pointer;
+    background: transparent; color: inherit; font-family: inherit;
+  }
+  .label.project { font-weight: 600; }
+  .label.bad { border-color: #e5484d; color: #e5484d; }
 
   .thumb-tags .chip {
     background: rgba(12, 14, 20, 0.62);
@@ -805,7 +813,7 @@
       <label class="search">
         <span class="visually-hidden">Search prompts and models</span>
         <svg class="icon"><use href="#i-search"/></svg>
-        <input type="search" id="searchInput" placeholder="Search prompts or models" autocomplete="off">
+        <input type="search" id="searchInput" placeholder="Search prompts, models, projects, tags" autocomplete="off">
         <kbd>/</kbd>
       </label>
       <div class="segmented" id="kindFilter" role="group" aria-label="Filter"></div>
@@ -907,6 +915,9 @@
     r.source_images = (Array.isArray(r.source_images) ? r.source_images : [])
       .map(safeLocalPath)
       .filter(Boolean);
+    r.tags = (Array.isArray(r.tags) ? r.tags : []).filter(function (t) { return typeof t === "string"; });
+    r.project = typeof r.project === "string" ? r.project : "";
+    r.size = typeof r.size === "string" ? r.size : "";
     return r;
   });
 
@@ -1084,7 +1095,9 @@
     if (!state.query) return true;
     var q = state.query.toLowerCase();
     return (record.prompt || "").toLowerCase().indexOf(q) !== -1 ||
-      (record.model || "").toLowerCase().indexOf(q) !== -1;
+      (record.model || "").toLowerCase().indexOf(q) !== -1 ||
+      (record.project || "").toLowerCase().indexOf(q) !== -1 ||
+      record.tags.some(function (t) { return t.toLowerCase().indexOf(q) !== -1; });
   }
 
   // ---------- grid ----------
@@ -1126,6 +1139,27 @@
     requestAnimationFrame(function () {
       if (prompt.scrollHeight > prompt.clientHeight + 2) more.hidden = false;
     });
+
+    var labelValues = [];
+    if (record.project) labelValues.push(["project", record.project]);
+    if (record.size) labelValues.push(["", record.size]);
+    if (record.text_check && record.text_check.ok === false) labelValues.push(["bad", "text mismatch"]);
+    record.tags.forEach(function (t) { labelValues.push(["", t]); });
+    if (labelValues.length) {
+      var labels = el("div", "labels");
+      labelValues.forEach(function (pair) {
+        var b = el("button", "label" + (pair[0] ? " " + pair[0] : ""), pair[1]);
+        b.type = "button";
+        b.title = "Filter by " + pair[1];
+        b.addEventListener("click", function () {
+          searchInput.value = pair[1];
+          state.query = pair[1];
+          render();
+        });
+        labels.appendChild(b);
+      });
+      body.appendChild(labels);
+    }
 
     var foot = el("div", "card-foot");
     var meta = el("div", "meta", (record.model || "default") + " · " + relativeTime(record.created_at));

@@ -1,6 +1,6 @@
 [project]
 name = "gemini-image-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server that generates images via the Gemini web app (gemini-webapi), backed by the user's own session cookies."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -22,6 +22,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "filelock>=4.0.1",
     "browser-cookie3>=0.20.1",
+    "pillow>=10.0.0",
 ]
 
 [project.urls]

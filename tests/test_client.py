@@ -7,6 +7,9 @@ raw third-party (or bare) exception type out of the client module's public API.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from gemini_webapi.exceptions import (
     APIError,
@@ -286,3 +289,16 @@ def test_cookie_file_applies_to_chosen_browser_only():
     assert client_mod.cookie_file_for("edge", auto) is None
     assert client_mod.cookie_file_for("edge", edge) == "x.db"
     assert client_mod.cookie_file_for("firefox", edge) is None
+
+
+async def test_get_client_rebuilds_a_dead_session(fake_init):
+    from gemini_webapi.constants import AccountStatus
+
+    dead = SimpleNamespace(account_status=AccountStatus.UNAUTHENTICATED, close=AsyncMock())
+    client_mod._client = dead
+
+    fresh = await client_mod.get_client(_settings())
+
+    assert fresh is not dead
+    dead.close.assert_awaited_once()
+    assert fake_init == [("ff", "ffts")]  # cookies re-read from the browser

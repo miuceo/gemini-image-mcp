@@ -234,6 +234,17 @@ def test_resolve_token_falls_back_to_env(tmp_path, monkeypatch):
     assert github._resolve_token(_settings(tmp_path, github_token=None)) == "from-env"
 
 
+def test_gh_cli_token_not_used_unless_allowed(tmp_path, monkeypatch):
+    monkeypatch.setattr(github, "_token_cache", None)
+    monkeypatch.setattr(github.shutil, "which", lambda _name: "gh")
+    calls = []
+    monkeypatch.setattr(github.subprocess, "run", lambda *a, **k: calls.append(a))
+
+    with pytest.raises(github.GitHubPublishError, match="fine-grained"):
+        github._resolve_token(_settings(tmp_path, github_token=None))
+    assert calls == []
+
+
 # ---------------------------------------------------------------------------
 # core wiring
 # ---------------------------------------------------------------------------

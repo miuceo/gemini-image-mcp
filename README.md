@@ -35,6 +35,10 @@ no-warranty disclaimer.
 - **`generate_image`** and **`edit_image`** MCP tools backed by your own Gemini web
   session — no API key, no per-image billing.
 - **`list_models`** to discover which models your account can use.
+- **Exact sizes** for marketplace cards (e.g. Uzum 1080×1440), **projects and tags** in the
+  gallery, **previews** returned to the model, and a **rendered-text spelling check**.
+- **Background jobs and batches** with idempotency keys, rate-limit backoff, retries and
+  resume after a crash, so slow generations never time out silently.
 - Every generated or edited image accumulates into a single, self-contained, interactive
   HTML gallery (`output/gallery.html`) — the primary way to browse your output. Click any
   image for a detail view with its full prompt, metadata, and copy buttons.
@@ -183,14 +187,38 @@ Equivalent JSON (e.g. for `claude_desktop_config.json` or `.mcp.json`):
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `generate_image` | `prompt: str`, `model: str \| None = None`, `publish: bool \| None = None` | Absolute path(s) of the newly saved image(s), the absolute path to `output/gallery.html`, the image count, the model actually used, and each image's public URL if it was published. |
-| `edit_image` | `prompt: str`, `image_paths: list[str]`, `model: str \| None = None`, `publish: bool \| None = None` | Same return shape as `generate_image`, applied to edits of the given source image(s). |
-| `publish_image` | `image_paths: list[str]` | Uploads existing images (absolute paths, `images/<file>` paths, or gallery ids) to your configured GitHub repo and returns their public URLs. |
-| `list_models` | _(none)_ | The models (image/chat) available to the signed-in account, as display name + internal model name/id, so you can pick a non-default `model` for the other two tools. |
-| `doctor` | _(none)_ | A setup health check, one ok/warn/fail line per item (see [Troubleshooting](#troubleshooting)). |
+| `generate_image` | `prompt`, `model`, `publish`, `aspect_ratio`, `size`, `project`, `tags`, `expected_text`, `idempotency_key`, `preview` | Path(s) of the new image(s), gallery path, model used, public URL if published, text-check result, and JPEG previews when `preview=true`. Waits up to `GEMINI_SYNC_WAIT` (85 s); if Gemini is slower it returns a **job id** instead of timing out. |
+| `edit_image` | `prompt`, `image_paths`, plus the same options | Same as `generate_image`, using the given images as sources/references. |
+| `start_generation` | same as above (`image_paths` makes it an edit) | Returns a job id immediately; the work runs in the background. |
+| `get_job` | `job_id`, `wait_seconds` (≤ 90), `preview` | Job status (`queued` / `running` / `succeeded` / `failed` / `interrupted`) and its result. |
+| `list_jobs` | `limit` | Recent jobs from any server process. |
+| `generate_batch` | `items` (list of `{id, prompt, tags, aspect_ratio, size, project, expected_text, model, image_paths}`), defaults, `batch_id`, `max_retries`, `text_retries`, `delay_seconds`, `publish` | Starts a background batch: rate-limit backoff (1/2/4 min, then pause), retries, optional regeneration on misspelled text, per-item status, progress saved after every item. |
+| `get_batch` | `batch_id` (empty = list), `wait_seconds`, `details` | Batch progress and per-item paths / errors / text-check flags. |
+| `resume_batch` | `batch_id`, `retry_failed` | Continues a paused, interrupted or partly failed batch; finished items are skipped. |
+| `cancel_batch` | `batch_id` | Stops a batch after its current item. |
+| `view_images` | `images` (paths or gallery ids), `max_side` | JPEG previews so the model can QA images (spelling, layout). |
+| `check_image_text` | `image`, `expected_text` | Reads the rendered text back via Gemini and flags missing or misspelled words (Uzbek `o‘`/`g‘` apostrophe variants count as equal). |
+| `publish_image` | `image_paths` | Uploads existing images to your configured GitHub repo and returns their public URLs. |
+| `list_models` | _(none)_ | Models available to the signed-in account. Fails with a clear error after ~55 s instead of hanging. |
+| `ping` | _(none)_ | Instant, no-network health check (version, sign-in state, running jobs, limits). Call before long work. |
+| `doctor` | `test_generation` | Setup health check; `test_generation=true` also makes one tiny image end to end. |
 
-None of the tools return base64 image data — the gallery is the intended viewing surface,
-and every tool result includes its path so you can always click through to it.
+### Sizes and aspect ratios
+
+`aspect_ratio` (`"3:4"`, `"16:9"`, ...) is written into the prompt, and the result is then
+center-cropped to exactly that ratio. `size` (`"1080x1440"`, or a preset: `uzum` = 1080×1440,
+`instagram-post` = 1080×1350, `instagram-square`, `story` = 1080×1920, `youtube-thumbnail`)
+also resizes to the exact pixel size. The unprocessed original is kept in a `raw/` subfolder.
+
+### Jobs, timeouts and retries
+
+MCP bridges abandon a tool call after ~2 minutes, and a Gemini generation can take longer.
+So every generation runs as a background job saved to `output/jobs/<id>.json`; any server
+process can report on it. Pass an `idempotency_key` and a retry returns the earlier job or
+result instead of making a duplicate. Every network step has a timeout: sign-in
+(`GEMINI_INIT_TIMEOUT`, 45 s), the image download (90 s) and the whole job
+(`GEMINI_JOB_TIMEOUT`, 300 s). Generations run one at a time per process
+(`GEMINI_MAX_CONCURRENT`) so parallel calls don't trip Gemini's rate limits.
 
 ## Publishing images to GitHub
 

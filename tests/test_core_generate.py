@@ -268,3 +268,22 @@ async def test_list_models_maps_fields(tmp_path, fake_client):
     models = await core.list_models(settings=settings)
 
     assert models == [{"display_name": "Gemini Test", "model_name": "gemini-test"}]
+
+
+async def test_generate_retries_once_when_session_dies(tmp_path, monkeypatch, fake_save):
+    from gemini_webapi.constants import AccountStatus
+
+    dead = Mock(account_status=AccountStatus.UNAUTHENTICATED)
+    dead.generate_content = AsyncMock(side_effect=Exception("Permission denied"))
+    fresh = Mock(account_status=AccountStatus.AVAILABLE)
+    fresh.generate_content = AsyncMock(
+        return_value=SimpleNamespace(images=[_gen_image()], text="ok")
+    )
+    monkeypatch.setattr(core, "get_client", AsyncMock(side_effect=[dead, fresh]))
+    reset = AsyncMock()
+    monkeypatch.setattr(core, "reset_client", reset)
+
+    records = await core.generate_images("a fox", settings=_settings(tmp_path))
+
+    assert len(records) == 1
+    reset.assert_awaited_once()

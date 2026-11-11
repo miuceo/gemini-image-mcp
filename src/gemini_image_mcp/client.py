@@ -12,6 +12,7 @@ import asyncio
 import sys
 
 from gemini_webapi import GeminiClient
+from gemini_webapi.constants import AccountStatus
 from gemini_webapi.exceptions import (
     APIError,
     AuthError,
@@ -42,6 +43,10 @@ class GeminiUsageLimitError(GeminiImageError):
 
 class GeminiGenerationError(GeminiImageError):
     """Raised when content/image generation fails or returns no usable output."""
+
+
+class GeminiTimeoutError(GeminiGenerationError):
+    """Raised when a Gemini step (sign-in, generation, download) exceeds its time limit."""
 
 
 _AUTH_ERROR_MESSAGE = (
@@ -172,7 +177,9 @@ def map_library_error(exc: Exception) -> GeminiImageError:
         return GeminiUsageLimitError(
             f"Temporarily blocked by Gemini (rate limited): {exc}"
         )
-    if isinstance(exc, (LibTimeoutError, ModelInvalidError, APIError, GeminiError)):
+    if isinstance(exc, LibTimeoutError):
+        return GeminiTimeoutError(str(exc) or "Gemini request timed out.")
+    if isinstance(exc, (ModelInvalidError, APIError, GeminiError)):
         return GeminiGenerationError(str(exc) or f"{type(exc).__name__} from gemini_webapi.")
     # Unknown exception type: wrap it rather than letting a raw third-party exception
     # (or bare Exception) leak out of this layer's public API.
@@ -183,6 +190,15 @@ _client: GeminiClient | None = None
 _client_lock = asyncio.Lock()
 # Where the current client's cookies came from, for diagnostics (never the values).
 _cookie_source_used: str | None = None
+
+
+def session_dead(client: object) -> bool:
+    """Whether Gemini marked this client's session UNAUTHENTICATED.
+
+    gemini_webapi keeps that status for the client's whole life (every later call fails with
+    "Permission denied"), so such a client must be rebuilt, not reused.
+    """
+    return getattr(client, "account_status", None) == AccountStatus.UNAUTHENTICATED
 
 
 def cookie_source_used() -> str | None:
@@ -211,10 +227,17 @@ async def get_client(settings: Settings | None = None) -> GeminiClient:
     """
     global _client, _cookie_source_used
 
-    if _client is not None:
+    if _client is not None and not session_dead(_client):
         return _client
 
     async with _client_lock:
+        if _client is not None and session_dead(_client):
+            # The session died mid-process: drop it so cookies are re-read below.
+            try:
+                await _client.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup of a dead session
+                pass
+            _client = None
         # Re-check after acquiring the lock: another caller may have finished init already.
         if _client is not None:
             return _client
@@ -276,7 +299,12 @@ async def _init_from_browsers(
     for browser in browsers:
         label = BROWSERS[browser]
         try:
-            psid, psidts = load_browser_cookies(browser, cookie_file_for(browser, settings))
+            # browser_cookie3 does blocking file I/O and DPAPI/keyring calls; run it on a worker
+            # thread so a slow cookie store can't freeze the event loop (and every other tool
+            # call this server is handling).
+            psid, psidts = await asyncio.to_thread(
+                load_browser_cookies, browser, cookie_file_for(browser, settings)
+            )
         except BrowserCookieError as exc:
             if not (probing and exc.missing_store):
                 problems.append(str(exc))
@@ -303,12 +331,32 @@ async def _init_client(
         proxy=settings.proxy,
     )
     try:
-        await client.init(
-            timeout=settings.timeout,
-            auto_close=False,
-            auto_refresh=True,
-            refresh_interval=settings.refresh_interval,
+        await asyncio.wait_for(
+            client.init(
+                timeout=settings.timeout,
+                auto_close=False,
+                auto_refresh=True,
+                refresh_interval=settings.refresh_interval,
+            ),
+            timeout=settings.init_timeout,
         )
+    except asyncio.TimeoutError:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+        raise GeminiTimeoutError(
+            f"Signing in to Gemini took longer than {settings.init_timeout:.0f}s. "
+            "gemini.google.com may be slow or unreachable (check the network / GEMINI_PROXY)."
+        ) from None
     except Exception as exc:  # noqa: BLE001 - translated deliberately at this boundary
         raise map_library_error(exc) from exc
+    if session_dead(client):
+        # init() accepts a signed-out (guest) session; treat it as a failed login so the
+        # next browser is tried instead of every generation failing later.
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+        raise GeminiAuthError(_AUTH_ERROR_MESSAGE)
     return client
